@@ -1,65 +1,133 @@
-# Zebrafish ESM Similarity Dashboard
+# Zebrafish ESM Search
 
-A small local black-dashboard app for searching a zebrafish ESM embedding database. It uses Python’s built-in local web server, so there is no Streamlit or Flask dependency.
+A dual-mode zebrafish protein discovery dashboard that combines a private ESM embedding database with an optional, grounded AI query layer.
 
-It is designed for this workflow:
+The important architectural rule is simple:
 
-1. Keep your original ESM files in their current folder.
-2. Use `build_database.py` to create a separate SQLite `.db` file.
-3. Run `app.py` to open a local browser dashboard.
-4. Search a protein/gene name and get the most similar zebrafish proteins by cosine similarity.
+> **AI interprets biological language and explains results. Deterministic systems control protein identity, external retrieval, embedding similarity, and ranking.**
 
-The dashboard runs locally only, at `http://127.0.0.1:5000`.
+The real embedding database is never committed to this repository and embedding vectors are never sent to the browser or to the AI provider.
 
----
+## Two search modes
 
-## Folder layout
+### 1. Protein lookup — deterministic
+
+Input examples:
 
 ```text
-zebrafish_esm_dashboard/
-├── app.py
-├── build_database.py
-├── requirements.txt
-├── README.md
-├── data/
-│   └── zebrafish_esm.db      # created by you
-├── templates/
-│   └── index.html
-├── static/
-│   ├── styles.css
-│   └── app.js
-└── scripts/
-    └── create_demo_db.py
+gata1a
+mpx
+ENSDARP...
 ```
 
-Your original embedding files stay outside this folder unless you choose otherwise.
+Flow:
 
----
+```text
+exact/fuzzy local identity resolution
+→ private ESM embedding database
+→ cosine similarity
+→ ranked zebrafish proteins
+```
+
+No AI is required for this path.
+
+### 2. Biological question — AI-assisted, evidence-grounded
+
+Input example:
+
+```text
+proteins involved in erythropoiesis
+```
+
+Flow:
+
+```text
+natural-language question
+→ Gemini converts the question into biological retrieval concepts
+→ UniProt retrieves Danio rerio proteins for those concepts
+→ retrieved proteins must resolve exactly into the local ESM database
+→ ESM ranks proteins by similarity to the validated seed set
+→ optional Gemini explanation of the already-ranked results
+```
+
+Gemini is deliberately **not asked to invent seed genes**. If Gemini is unavailable, the system falls back to deterministic retrieval using the original question. If UniProt is unavailable, a local annotation fallback can still generate seeds.
+
+## Privacy / data-egress boundary
+
+The application is designed so that:
+
+- real `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` embedding artifacts stay private;
+- the browser receives ranked protein metadata, never raw embeddings;
+- `GEMINI_API_KEY` remains server-side;
+- Gemini receives the biological question and compact result/seed metadata only;
+- Gemini never receives embedding vectors or database credentials.
+
+## Architecture
+
+```text
+Browser UI
+   │
+   ├── Protein lookup
+   │      └── local resolver → NumPy/SQLite ESM similarity
+   │
+   └── Biological question
+          └── Gemini query planner
+                 ↓
+             UniProt REST
+                 ↓
+        exact local seed validation
+                 ↓
+         private ESM similarity
+                 ↓
+       optional Gemini explanation
+```
+
+Current stack:
+
+- Python standard-library HTTP server
+- SQLite
+- NumPy
+- optional Gemini REST API
+- UniProt REST API
+- vanilla HTML/CSS/JavaScript
+- GitHub Actions + `unittest`
+
+No Flask, FastAPI, Streamlit, or Gemini SDK is required for the current local version.
 
 ## Install
 
-From Terminal on Mac:
-
 ```bash
-cd /path/to/zebrafish_esm_dashboard
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs NumPy and pandas for database building/search. The dashboard server itself uses Python’s standard library.
-
-If your embeddings are `.pt` files made by the ESM extraction script, install PyTorch too:
+If your source ESM embeddings are `.pt` files, install PyTorch separately:
 
 ```bash
 pip install torch
 ```
 
----
+## Configure optional AI
 
-## Option A — Build DB from one `.npy` matrix + metadata CSV
+Copy the example environment file:
 
-Use this if you have one embeddings matrix where rows match your metadata rows.
+```bash
+cp .env.example .env
+```
+
+Then set:
+
+```text
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+The app also accepts these as normal environment variables. Exact protein lookup works without a Gemini key.
+
+## Build the private database
+
+### From `.npy` embeddings + metadata CSV
 
 ```bash
 python build_database.py \
@@ -71,13 +139,7 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-If your metadata column names are different, change `protein_id`, `gene_name`, and `description`.
-
----
-
-## Option B — Build DB from `.npz`
-
-Use this if you have a compressed NumPy file containing embeddings and IDs.
+### From `.npz`
 
 ```bash
 python build_database.py \
@@ -86,13 +148,7 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-The script looks for common keys like `embeddings`, `vectors`, `X`, `ids`, `protein_ids`, and `labels`.
-
----
-
-## Option C — Build DB from an ESM `.pt` directory
-
-Use this if your ESM output folder contains one `.pt` file per protein.
+### From an ESM `.pt` directory
 
 ```bash
 python build_database.py \
@@ -101,11 +157,7 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-The script extracts `mean_representations` when available, choosing the highest ESM layer automatically.
-
----
-
-## Run the dashboard
+## Run locally
 
 ```bash
 python app.py --db data/zebrafish_esm.db
@@ -117,36 +169,51 @@ Open:
 http://127.0.0.1:5000
 ```
 
-Search for a gene/protein name, for example:
+The local server intentionally refuses non-loopback binding. Public deployment should put the application behind a proper hosted service rather than exposing the development server directly.
 
-```text
-mpx
-```
-
-The app resolves the closest matching protein in your database and returns the most similar proteins by cosine similarity.
-
----
-
-## Test with a fake demo database
-
-This is only to confirm the dashboard works before connecting your real zebrafish data.
+## Demo database
 
 ```bash
 python scripts/create_demo_db.py
 python app.py --db data/demo_zebrafish_esm.db
 ```
 
-Then open `http://127.0.0.1:5000` and search for:
+Then try a deterministic protein lookup such as:
 
 ```text
 mpx
 ```
 
----
+The demo database is synthetic and is not the private production embedding set.
 
-## Notes
+## API routes
 
-- Cosine similarity uses normalized ESM vectors.
-- For 26k zebrafish proteins, the app loads vectors into memory once at startup. This should be fine on a normal laptop.
-- SQLite stores the metadata and float32 normalized vector blobs.
-- Original ESM files are not modified.
+```text
+GET /api/health
+GET /api/status
+GET /api/search?q=gata1a&k=20
+GET /api/discover?q=proteins%20involved%20in%20erythropoiesis&k=20
+GET /api/suggest?q=gat
+```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile app.py build_database.py
+```
+
+The tests explicitly check that deterministic protein lookup remains functional without an AI key and that biological discovery ranks from validated seed indices rather than AI-generated gene guesses.
+
+## Next deployment step
+
+For a public portfolio demo, the intended topology is:
+
+```text
+public GitHub source
+→ hosted Python service
+→ private server-side ESM database / object storage
+→ browser receives ranked results only
+```
+
+The production deployment should add request limits, caching for UniProt/AI calls, deployment-specific secret management, and a persistent private storage layer for the real embeddings.
