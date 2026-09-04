@@ -3,48 +3,57 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Zebrafish ESM Similarity</title>
+  <title>Zebrafish ESM Discovery</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
 </head>
 <body>
   <main class="shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">Local ESM search</p>
-        <h1>Zebrafish protein similarity</h1>
-        <p class="subtitle">Search one protein and find the nearest proteins in your 26k ESM embedding database.</p>
+        <p class="eyebrow">ESM + grounded AI discovery</p>
+        <h1>Zebrafish protein search</h1>
+        <p class="subtitle">Exact protein similarity stays deterministic. Biological questions are interpreted by AI, grounded through zebrafish UniProt seeds, then ranked against your private ESM database.</p>
       </div>
-      <div class="status-card">
-        <span class="dot"></span>
-        <div>
-          <strong>{{ '{:,}'.format(protein_count) }}</strong>
-          <small>proteins loaded</small>
+      <div class="status-stack">
+        <div class="status-card">
+          <span class="dot"></span>
+          <div>
+            <strong>{{ '{:,}'.format(protein_count) }}</strong>
+            <small>proteins loaded</small>
+          </div>
         </div>
+        <div id="aiStatus" class="ai-status">Checking AI status…</div>
       </div>
     </section>
 
     <section class="search-panel">
+      <div class="mode-tabs" role="tablist" aria-label="Search mode">
+        <button type="button" class="mode-tab active" data-mode="protein">Protein lookup</button>
+        <button type="button" class="mode-tab" data-mode="discovery">Biological question</button>
+      </div>
       <form id="searchForm">
-        <label for="query">Protein / gene name / ID</label>
+        <label id="queryLabel" for="query">Protein / gene name / ID</label>
         <div class="search-row">
-          <input id="query" name="query" type="search" placeholder="Example: mpx, tp53, ENSDARP..." autocomplete="off" autofocus />
+          <input id="query" name="query" type="search" placeholder="Example: gata1a, mpx, ENSDARP..." autocomplete="off" autofocus />
           <select id="k" name="k" aria-label="Number of similar proteins">
             <option value="10">Top 10</option>
             <option value="20" selected>Top 20</option>
             <option value="50">Top 50</option>
             <option value="100">Top 100</option>
           </select>
-          <button type="submit">Search</button>
+          <button id="searchButton" type="submit">Search</button>
         </div>
+        <p id="modeHelp" class="mode-help">Deterministic identity resolution → ESM cosine similarity.</p>
         <div id="suggestions" class="suggestions"></div>
       </form>
     </section>
 
     <section id="matchPanel" class="match-panel hidden"></section>
+    <section id="discoveryPanel" class="discovery-panel hidden"></section>
 
     <section class="table-panel">
       <div class="table-head">
-        <h2>Similar proteins</h2>
+        <h2 id="resultsTitle">Similar proteins</h2>
         <span id="resultCount"></span>
       </div>
       <div id="message" class="message">Enter a protein name to begin.</div>
@@ -58,6 +67,7 @@
               <th>Name</th>
               <th>Description</th>
               <th>Length</th>
+              <th id="seedHeader" class="hidden">Closest validated seed</th>
             </tr>
           </thead>
           <tbody id="resultsBody"></tbody>
@@ -67,7 +77,7 @@
 
     <footer>
       <span>DB: {{ db_path }}</span>
-      <span>Runs locally on your machine.</span>
+      <span>Embedding vectors never leave the server.</span>
     </footer>
   </main>
 
