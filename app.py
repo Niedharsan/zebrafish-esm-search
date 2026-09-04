@@ -348,12 +348,21 @@ def interpret_biological_query(question: str) -> Dict[str, Any]:
 
 Use Google Search before answering.
 
-Rules:
-- Zebrafish is always the final target species.
-- Search zebrafish / Danio rerio evidence first: cell markers, expression data, genetic studies, pathway annotations, ZFIN, UniProt, Ensembl, single-cell resources, and zebrafish papers.
-- For cell-type questions, prioritize established zebrafish markers and highly enriched/specific genes rather than generic pathway proteins.
-- If zebrafish evidence is genuinely sparse, you may mention strong human or mouse genes as reference evidence, but label the source species clearly. Do not invent zebrafish ortholog names.
-- Focus on the strongest directly relevant genes/proteins and explain briefly why each is relevant.
+For biological questions about a cell type, tissue, process, phenotype, pathway, or function, identify and rank the strongest zebrafish genes/proteins directly associated with the user's target concept.
+
+Prioritize, in this order:
+1. established zebrafish markers, defining genes, or highly specific genes for the target concept;
+2. genes shown to be highly enriched, highly expressed, or strongly associated with the target concept in zebrafish;
+3. genes with strong direct zebrafish functional evidence;
+4. broader related genes only after the more specific evidence above.
+
+Prefer genes that are directly characteristic of the target concept over genes that are only indirectly related through a broad process.
+
+If strong zebrafish evidence is sparse, use well-supported human or mouse evidence to identify plausible conserved genes, but report these separately for deterministic zebrafish orthology mapping.
+
+Produce a ranked section called "TOP ZEBRAFISH CANDIDATES" containing up to 10 genes, strongest evidence first, with a short reason for each.
+
+Zebrafish is always the final target species. Search zebrafish / Danio rerio evidence first, including relevant expression resources, genetic studies, pathway annotations, ZFIN, UniProt, Ensembl, single-cell resources, and zebrafish papers.
 
 Return a concise plain-text research note. Do NOT return JSON. Include gene symbols and species labels where relevant.
 """
@@ -362,7 +371,7 @@ Return a concise plain-text research note. Do NOT return JSON. Include gene symb
         grounded_research = _gemini_text(research_prompt, use_google_search=True)
 
         structure_prompt = f"""Convert the grounded research note below into a zebrafish protein-discovery plan.
-Do not add genes that are absent from the research note. Do not substitute general biological knowledge for the supplied evidence.
+
 The final target species is Danio rerio.
 
 Original user question: {question!r}
@@ -372,20 +381,24 @@ Grounded research note:
 {grounded_research[:12000]}
 ---
 
+IMPORTANT:
+- zebrafish_candidates must contain the strongest zebrafish genes from the "TOP ZEBRAFISH CANDIDATES" section.
+- Preserve their evidence-based ranking.
+- Prefer genes that are directly characteristic of the user's target concept over genes that are only broadly or indirectly related.
+- Keep human/mouse candidates separate from zebrafish_candidates.
+
 Return only JSON with this exact shape:
 {{
   "normalized_question": "zebrafish-specific normalized question",
   "retrieval_terms": ["3 to 5 concise zebrafish biological search concepts"],
   "zebrafish_candidates": [
-    {{"gene": "Danio rerio gene symbol", "species": "zebrafish", "reason": "brief zebrafish-specific evidence/relevance from the research note"}}
+    {{"gene": "exact zebrafish gene symbol", "species": "zebrafish", "reason": "direct evidence/relevance"}}
   ],
   "reference_candidates": [
     {{"gene": "human or mouse gene symbol", "species": "human or mouse", "reason": "why this mammalian evidence is useful because zebrafish evidence is sparse"}}
   ],
   "rationale": "one or two sentences"
 }}
-
-Give up to 8 strong zebrafish candidates. Put mammalian genes only in reference_candidates. Zebrafish evidence takes priority.
 """
         data = _parse_json_object(_gemini_text(structure_prompt))
 
