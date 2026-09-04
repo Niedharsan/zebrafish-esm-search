@@ -55,10 +55,10 @@ class DashboardTests(unittest.TestCase):
     def test_google_search_grounding_omits_json_response_mime_type(self, mock_http):
         os.environ["GEMINI_API_KEY"] = "test-key"
         mock_http.return_value = {
-            "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]
+            "candidates": [{"content": {"parts": [{"text": "grounded research"}]}}]
         }
 
-        self.assertEqual(app._gemini_text("test", use_google_search=True), '{"ok": true}')
+        self.assertEqual(app._gemini_text("test", use_google_search=True), "grounded research")
         payload = json.loads(mock_http.call_args.kwargs["data"].decode("utf-8"))
         self.assertEqual(payload["tools"], [{"google_search": {}}])
         self.assertNotIn("responseMimeType", payload["generationConfig"])
@@ -75,30 +75,53 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
         self.assertNotIn("tools", payload)
 
+    @patch("app._http_json")
+    def test_empty_grounded_response_reports_finish_reason(self, mock_http):
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        mock_http.return_value = {
+            "candidates": [
+                {
+                    "content": {"parts": []},
+                    "finishReason": "STOP",
+                    "groundingMetadata": {"webSearchQueries": ["zebrafish macrophage marker"]},
+                }
+            ]
+        }
+        with self.assertRaisesRegex(RuntimeError, "finishReason=STOP"):
+            app._gemini_text("test", use_google_search=True)
+
     def test_json_parser_can_extract_grounded_json_from_wrapping_text(self):
         parsed = app._parse_json_object('Grounded result:\n{"gene": "mpeg1.1"}\n')
         self.assertEqual(parsed["gene"], "mpeg1.1")
 
     @patch("app._gemini_text")
-    def test_ai_planner_is_search_grounded_and_species_scoped(self, mock_gemini):
+    def test_ai_planner_uses_search_then_structures_separately(self, mock_gemini):
         os.environ["GEMINI_API_KEY"] = "test-key"
-        mock_gemini.return_value = '''{
-          "normalized_question": "zebrafish macrophage proteins",
-          "retrieval_terms": ["macrophage", "phagocytosis"],
-          "zebrafish_candidates": [{"gene": "mpeg1.1", "species": "zebrafish", "reason": "zebrafish macrophage marker"}],
-          "reference_candidates": [{"gene": "CD68", "species": "human", "reason": "mammalian macrophage reference"}],
-          "rationale": "zebrafish first"
-        }'''
+        mock_gemini.side_effect = [
+            "Zebrafish macrophages are strongly marked by mpeg1.1. Human CD68 is a mammalian macrophage reference.",
+            '''{
+              "normalized_question": "zebrafish macrophage proteins",
+              "retrieval_terms": ["macrophage", "phagocytosis"],
+              "zebrafish_candidates": [{"gene": "mpeg1.1", "species": "zebrafish", "reason": "zebrafish macrophage marker"}],
+              "reference_candidates": [{"gene": "CD68", "species": "human", "reason": "mammalian macrophage reference"}],
+              "rationale": "zebrafish first"
+            }''',
+        ]
+
         plan = app.interpret_biological_query("macrophage proteins")
         self.assertTrue(plan["ai_used"])
         self.assertTrue(plan["search_grounded"])
         self.assertEqual(plan["zebrafish_candidates"][0]["gene"], "mpeg1.1")
         self.assertEqual(plan["reference_candidates"][0]["species"], "human")
-        _, kwargs = mock_gemini.call_args
-        self.assertTrue(kwargs["use_google_search"])
-        prompt = mock_gemini.call_args.args[0]
-        self.assertIn("DANIO RERIO", prompt)
-        self.assertIn("Search zebrafish-specific evidence first", prompt)
+        self.assertEqual(mock_gemini.call_count, 2)
+
+        research_call = mock_gemini.call_args_list[0]
+        structure_call = mock_gemini.call_args_list[1]
+        self.assertTrue(research_call.kwargs["use_google_search"])
+        self.assertFalse(structure_call.kwargs.get("use_google_search", False))
+        self.assertIn("DANIO RERIO", research_call.args[0])
+        self.assertIn("Do NOT return JSON", research_call.args[0])
+        self.assertIn("mpeg1.1", structure_call.args[0])
 
     def test_ai_zebrafish_candidate_must_resolve_exactly_locally(self):
         seeds = app.validate_ai_zebrafish_candidates(
