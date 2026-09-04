@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -49,6 +50,34 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(plan["search_grounded"])
         self.assertEqual(plan["retrieval_terms"], ["proteins involved in erythropoiesis"])
         self.assertEqual(plan["zebrafish_candidates"], [])
+
+    @patch("app._http_json")
+    def test_google_search_grounding_omits_json_response_mime_type(self, mock_http):
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        mock_http.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]
+        }
+
+        self.assertEqual(app._gemini_text("test", use_google_search=True), '{"ok": true}')
+        payload = json.loads(mock_http.call_args.kwargs["data"].decode("utf-8"))
+        self.assertEqual(payload["tools"], [{"google_search": {}}])
+        self.assertNotIn("responseMimeType", payload["generationConfig"])
+
+    @patch("app._http_json")
+    def test_non_grounded_gemini_call_keeps_json_response_mode(self, mock_http):
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        mock_http.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]
+        }
+
+        app._gemini_text("test")
+        payload = json.loads(mock_http.call_args.kwargs["data"].decode("utf-8"))
+        self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertNotIn("tools", payload)
+
+    def test_json_parser_can_extract_grounded_json_from_wrapping_text(self):
+        parsed = app._parse_json_object('Grounded result:\n{"gene": "mpeg1.1"}\n')
+        self.assertEqual(parsed["gene"], "mpeg1.1")
 
     @patch("app._gemini_text")
     def test_ai_planner_is_search_grounded_and_species_scoped(self, mock_gemini):
