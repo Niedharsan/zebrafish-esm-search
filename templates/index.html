@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zebrafish ESM Similarity</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Local ESM search</p>
+        <h1>Zebrafish protein similarity</h1>
+        <p class="subtitle">Search one protein and find the nearest proteins in your 26k ESM embedding database.</p>
+      </div>
+      <div class="status-card">
+        <span class="dot"></span>
+        <div>
+          <strong>{{ '{:,}'.format(protein_count) }}</strong>
+          <small>proteins loaded</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="search-panel">
+      <form id="searchForm">
+        <label for="query">Protein / gene name / ID</label>
+        <div class="search-row">
+          <input id="query" name="query" type="search" placeholder="Example: mpx, tp53, ENSDARP..." autocomplete="off" autofocus />
+          <select id="k" name="k" aria-label="Number of similar proteins">
+            <option value="10">Top 10</option>
+            <option value="20" selected>Top 20</option>
+            <option value="50">Top 50</option>
+            <option value="100">Top 100</option>
+          </select>
+          <button type="submit">Search</button>
+        </div>
+        <div id="suggestions" class="suggestions"></div>
+      </form>
+    </section>
+
+    <section id="matchPanel" class="match-panel hidden"></section>
+
+    <section class="table-panel">
+      <div class="table-head">
+        <h2>Similar proteins</h2>
+        <span id="resultCount"></span>
+      </div>
+      <div id="message" class="message">Enter a protein name to begin.</div>
+      <div class="table-wrap hidden" id="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Similarity</th>
+              <th>Protein ID</th>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Length</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <span>DB: {{ db_path }}</span>
+      <span>Runs locally on your machine.</span>
+    </footer>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

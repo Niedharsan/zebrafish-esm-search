@@ -1,0 +1,16 @@
+#!/bin/bash
+
+PROJECT_DIR="/Users/niedharsan/Downloads/Work/AI DATABASE/pg_zfish_project/zebrafish_esm_dashboard"
+LAUNCHER="$PROJECT_DIR/start_dashboard.command"
+
+if [ ! -x "$LAUNCHER" ]; then
+  /usr/bin/osascript -e 'display dialog "start_dashboard.command is missing or is not executable. Run chmod +x start_dashboard.command, then try again." buttons {"OK"} default button "OK" with icon caution'
+  exit 1
+fi
+
+/usr/bin/osascript <<APPLESCRIPT
+tell application "Terminal"
+  activate
+  do script quoted form of "$LAUNCHER"
+end tell
+APPLESCRIPT

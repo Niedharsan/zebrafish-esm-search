@@ -1,0 +1,4 @@
+numpy>=1.24
+pandas>=2.0
+# Optional: only needed when your ESM embeddings are .pt files from esm-extract
+# torch>=2.0
