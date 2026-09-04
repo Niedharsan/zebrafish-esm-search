@@ -254,8 +254,15 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
         cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
         data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("AI response was not valid JSON.") from exc
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise RuntimeError("AI response was not valid JSON.")
+        try:
+            data = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("AI response was not valid JSON.") from exc
     if not isinstance(data, dict):
         raise RuntimeError("AI response must be a JSON object.")
     return data
@@ -266,9 +273,15 @@ def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
+    generation_config: Dict[str, Any] = {"temperature": 0.1}
+    # Gemini 2.5 Search grounding rejects responseMimeType=application/json.
+    # For grounded calls the prompt requests JSON and the parser validates it.
+    if not use_google_search:
+        generation_config["responseMimeType"] = "application/json"
+
     payload: Dict[str, Any] = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        "generationConfig": generation_config,
     }
     if use_google_search:
         payload["tools"] = [{"google_search": {}}]
