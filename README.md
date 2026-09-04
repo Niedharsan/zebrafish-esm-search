@@ -110,13 +110,13 @@ pip install torch
 
 ## Configure optional AI
 
-Copy the example environment file:
+Copy the tracked configuration template into the ignored local `.env` file:
 
 ```bash
-cp .env.example .env
+cp config.example .env
 ```
 
-Then set:
+Then edit `.env` and set:
 
 ```text
 GEMINI_API_KEY=your_key_here
