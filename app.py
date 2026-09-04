@@ -2,11 +2,12 @@
 """Zebrafish ESM dashboard with deterministic and AI-assisted discovery modes.
 
 Exact protein lookup and ESM similarity remain deterministic. Biological-query
-mode is zebrafish-first: Gemini may use Google Search to identify relevant
-Danio rerio biology, but every final ESM seed must resolve to a protein in the
-local zebrafish database. When zebrafish evidence is sparse, human/mouse genes
-may be used only as reference evidence and are deterministically mapped to
-zebrafish orthologues with Ensembl before they can become seeds.
+mode is zebrafish-first: Gemini uses Google Search for evidence gathering, then
+a separate structured-output call converts that research into candidate genes.
+Every final ESM seed must resolve to a protein in the local zebrafish database.
+When zebrafish evidence is sparse, human/mouse genes may be used only as
+reference evidence and are deterministically mapped to zebrafish orthologues
+with Ensembl before they can become seeds.
 """
 
 from __future__ import annotations
@@ -233,7 +234,7 @@ def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
 def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Optional[bytes] = None) -> Any:
     request_headers = {
         "Accept": "application/json",
-        "User-Agent": "zebrafish-esm-search/2.1",
+        "User-Agent": "zebrafish-esm-search/2.2",
         **(headers or {}),
     }
     req = Request(url, data=data, headers=request_headers, method="POST" if data is not None else "GET")
@@ -274,8 +275,6 @@ def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
     generation_config: Dict[str, Any] = {"temperature": 0.1}
-    # Gemini 2.5 Search grounding rejects responseMimeType=application/json.
-    # For grounded calls the prompt requests JSON and the parser validates it.
     if not use_google_search:
         generation_config["responseMimeType"] = "application/json"
 
@@ -294,10 +293,18 @@ def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
     candidates = response.get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemini returned no candidate response.")
-    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+
+    candidate = candidates[0] or {}
+    parts = ((candidate.get("content") or {}).get("parts") or [])
     text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
     if not text:
-        raise RuntimeError("Gemini returned an empty response.")
+        metadata = candidate.get("groundingMetadata") or {}
+        queries = metadata.get("webSearchQueries") or []
+        finish_reason = candidate.get("finishReason") or "unknown"
+        suffix = f" finishReason={finish_reason}"
+        if queries:
+            suffix += f"; search_queries={queries[:3]}"
+        raise RuntimeError(f"Gemini returned no text.{suffix}")
     return text
 
 
@@ -323,7 +330,7 @@ def _clean_candidate_list(values: Any, *, allowed_species: Optional[set[str]] = 
 
 
 def interpret_biological_query(question: str) -> Dict[str, Any]:
-    """Create a zebrafish-first, search-grounded biological retrieval plan."""
+    """Research zebrafish biology first, then structure the grounded evidence."""
     question = question.strip()
     fallback = {
         "normalized_question": question,
@@ -337,33 +344,51 @@ def interpret_biological_query(question: str) -> Dict[str, Any]:
     if not ai_available():
         return fallback
 
-    prompt = f"""You are the biological-search planner for a DANIO RERIO (zebrafish) protein-discovery system.
-User question: {question!r}
+    research_prompt = f"""Research this biological question specifically for DANIO RERIO (zebrafish): {question!r}
 
-Species policy:
-1. The final biological target is ALWAYS zebrafish / Danio rerio.
-2. Search zebrafish-specific evidence first. Prefer zebrafish cell markers, expression data, genetic studies, pathway annotations, ZFIN/UniProt/Ensembl resources, and zebrafish papers.
-3. For every web search you perform for primary evidence, include zebrafish or Danio rerio context. Do not let generic human search results define the zebrafish answer.
-4. If zebrafish evidence for a protein/pathway is sparse, you MAY use strong human or mouse evidence to identify plausible conserved reference genes. Report those separately. Do not claim they are zebrafish genes and do not invent the zebrafish ortholog; the application will map them deterministically with Ensembl.
-5. Prefer highly specific/directly relevant genes or proteins over broad generic pathway members. For a cell-type question, prioritize established zebrafish markers or highly enriched/specific genes when available.
+Use Google Search before answering.
 
-Use Google Search to research the question before answering. Return ONLY JSON with this shape:
+Rules:
+- Zebrafish is always the final target species.
+- Search zebrafish / Danio rerio evidence first: cell markers, expression data, genetic studies, pathway annotations, ZFIN, UniProt, Ensembl, single-cell resources, and zebrafish papers.
+- For cell-type questions, prioritize established zebrafish markers and highly enriched/specific genes rather than generic pathway proteins.
+- If zebrafish evidence is genuinely sparse, you may mention strong human or mouse genes as reference evidence, but label the source species clearly. Do not invent zebrafish ortholog names.
+- Focus on the strongest directly relevant genes/proteins and explain briefly why each is relevant.
+
+Return a concise plain-text research note. Do NOT return JSON. Include gene symbols and species labels where relevant.
+"""
+
+    try:
+        grounded_research = _gemini_text(research_prompt, use_google_search=True)
+
+        structure_prompt = f"""Convert the grounded research note below into a zebrafish protein-discovery plan.
+Do not add genes that are absent from the research note. Do not substitute general biological knowledge for the supplied evidence.
+The final target species is Danio rerio.
+
+Original user question: {question!r}
+
+Grounded research note:
+---
+{grounded_research[:12000]}
+---
+
+Return only JSON with this exact shape:
 {{
   "normalized_question": "zebrafish-specific normalized question",
   "retrieval_terms": ["3 to 5 concise zebrafish biological search concepts"],
   "zebrafish_candidates": [
-    {{"gene": "Danio rerio gene symbol", "species": "zebrafish", "reason": "brief zebrafish-specific evidence/relevance"}}
+    {{"gene": "Danio rerio gene symbol", "species": "zebrafish", "reason": "brief zebrafish-specific evidence/relevance from the research note"}}
   ],
   "reference_candidates": [
-    {{"gene": "human or mouse gene symbol", "species": "human or mouse", "reason": "why mammalian evidence is useful because zebrafish evidence is sparse"}}
+    {{"gene": "human or mouse gene symbol", "species": "human or mouse", "reason": "why this mammalian evidence is useful because zebrafish evidence is sparse"}}
   ],
   "rationale": "one or two sentences"
 }}
 
-Give up to 8 strong zebrafish candidates. Only use reference_candidates when useful; zebrafish evidence takes priority.
+Give up to 8 strong zebrafish candidates. Put mammalian genes only in reference_candidates. Zebrafish evidence takes priority.
 """
-    try:
-        data = _parse_json_object(_gemini_text(prompt, use_google_search=True))
+        data = _parse_json_object(_gemini_text(structure_prompt))
+
         terms: List[str] = []
         for value in data.get("retrieval_terms") or []:
             term = str(value).strip()
@@ -371,11 +396,20 @@ Give up to 8 strong zebrafish candidates. Only use reference_candidates when use
                 terms.append(term[:120])
         if not terms:
             terms = [question]
+
         return {
             "normalized_question": str(data.get("normalized_question") or question).strip()[:240],
             "retrieval_terms": terms[:5],
-            "zebrafish_candidates": _clean_candidate_list(data.get("zebrafish_candidates"), allowed_species={"zebrafish", "danio rerio"}, limit=8),
-            "reference_candidates": _clean_candidate_list(data.get("reference_candidates"), allowed_species={"human", "mouse"}, limit=6),
+            "zebrafish_candidates": _clean_candidate_list(
+                data.get("zebrafish_candidates"),
+                allowed_species={"zebrafish", "danio rerio"},
+                limit=8,
+            ),
+            "reference_candidates": _clean_candidate_list(
+                data.get("reference_candidates"),
+                allowed_species={"human", "mouse"},
+                limit=6,
+            ),
             "rationale": str(data.get("rationale") or "Zebrafish-first grounded search plan.").strip()[:600],
             "ai_used": True,
             "search_grounded": True,
@@ -780,7 +814,7 @@ def status_api() -> Dict[str, Any]:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "ZebrafishESMDashboard/2.1"
+    server_version = "ZebrafishESMDashboard/2.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
