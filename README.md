@@ -1,21 +1,20 @@
 # Zebrafish ESM Search
 
-A dual-mode zebrafish protein discovery dashboard that combines a private ESM embedding database with an optional, grounded AI query layer.
+A dual-mode zebrafish protein discovery dashboard that combines a private ESM embedding database with a grounded AI query layer.
 
-The important architectural rule is simple:
+> **AI researches and interprets biological language. Deterministic systems control species identity, orthology mapping, protein identity, embedding similarity, and ranking.**
 
-> **AI interprets biological language and explains results. Deterministic systems control protein identity, external retrieval, embedding similarity, and ranking.**
-
-The real embedding database is never committed to this repository and embedding vectors are never sent to the browser or to the AI provider.
+The real embedding database is never committed to this repository and embedding vectors are never sent to the browser or to Gemini.
 
 ## Two search modes
 
 ### 1. Protein lookup — deterministic
 
-Input examples:
+Examples:
 
 ```text
 gata1a
+mpeg1.1
 mpx
 ENSDARP...
 ```
@@ -23,44 +22,63 @@ ENSDARP...
 Flow:
 
 ```text
-exact/fuzzy local identity resolution
+local identity resolution
 → private ESM embedding database
 → cosine similarity
 → ranked zebrafish proteins
 ```
 
-No AI is required for this path.
+No AI is required.
 
-### 2. Biological question — AI-assisted, evidence-grounded
+### 2. Biological question — zebrafish-first discovery
 
-Input example:
+Example:
 
 ```text
-proteins involved in erythropoiesis
+macrophage proteins
 ```
 
 Flow:
 
 ```text
 natural-language question
-→ Gemini converts the question into biological retrieval concepts
-→ UniProt retrieves Danio rerio proteins for those concepts
-→ retrieved proteins must resolve exactly into the local ESM database
-→ ESM ranks proteins by similarity to the validated seed set
-→ optional Gemini explanation of the already-ranked results
+→ Gemini + Google Search researches the question with Danio rerio as the fixed target species
+→ direct zebrafish candidate genes are proposed from zebrafish-specific evidence
+→ every proposed zebrafish gene must resolve exactly in the local zebrafish database
+→ deeper Danio rerio UniProt retrieval adds additional validated seeds
+→ if zebrafish evidence is sparse, strong human/mouse reference genes may be used
+→ mammalian reference genes are mapped to Danio rerio orthologues with Ensembl REST
+→ only mapped, locally validated zebrafish proteins can enter the final seed set
+→ private ESM similarity expands from those validated zebrafish seeds
+→ optional Gemini explanation of the ranked results
 ```
 
-Gemini is deliberately **not asked to invent seed genes**. If Gemini is unavailable, the system falls back to deterministic retrieval using the original question. If UniProt is unavailable, a local annotation fallback can still generate seeds.
+### Species policy
+
+- Final search space and final ESM seeds are always **Danio rerio**.
+- Zebrafish-specific evidence is searched and prioritized first.
+- For cell-type queries, established zebrafish markers or enriched/specific genes are preferred over generic pathway members.
+- Human/mouse evidence is allowed when zebrafish evidence is sparse, but mammalian genes cannot enter the ESM search directly.
+- Mammalian genes must first be mapped to zebrafish orthologues through Ensembl and then resolve exactly into the local zebrafish database.
+- Seed provenance is preserved so direct zebrafish evidence can be distinguished from mammalian-evidence/orthology inference.
+
+## Grounding and retrieval
+
+Biological discovery now uses three complementary routes:
+
+1. **Gemini Google Search, zebrafish-first** — identifies highly relevant zebrafish candidates and biological concepts.
+2. **UniProt Danio rerio retrieval** — searches a deeper result pool per concept and validates candidates against the local database.
+3. **Ensembl orthology fallback** — maps human/mouse reference genes to zebrafish only when direct zebrafish evidence is insufficient.
+
+AI-nominated genes are never accepted solely because the model named them. A direct zebrafish candidate must exist as an exact local zebrafish identity; cross-species candidates require deterministic orthology mapping first.
 
 ## Privacy / data-egress boundary
 
-The application is designed so that:
-
-- real `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` embedding artifacts stay private;
+- real `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` artifacts stay private;
 - the browser receives ranked protein metadata, never raw embeddings;
 - `GEMINI_API_KEY` remains server-side;
-- Gemini receives the biological question and compact result/seed metadata only;
-- Gemini never receives embedding vectors or database credentials.
+- Gemini receives biological questions and compact protein metadata, never embedding vectors or database credentials;
+- UniProt and Ensembl receive only ordinary public biological identifiers/search terms.
 
 ## Architecture
 
@@ -71,15 +89,18 @@ Browser UI
    │      └── local resolver → NumPy/SQLite ESM similarity
    │
    └── Biological question
-          └── Gemini query planner
-                 ↓
-             UniProt REST
-                 ↓
-        exact local seed validation
-                 ↓
-         private ESM similarity
-                 ↓
-       optional Gemini explanation
+          ├── Gemini + Google Search (Danio rerio first)
+          ├── direct zebrafish candidate validation
+          ├── UniProt Danio rerio retrieval
+          └── optional human/mouse reference evidence
+                    ↓
+               Ensembl orthology
+                    ↓
+        exact local zebrafish seed validation
+                    ↓
+             private ESM similarity
+                    ↓
+          optional Gemini explanation
 ```
 
 Current stack:
@@ -87,12 +108,13 @@ Current stack:
 - Python standard-library HTTP server
 - SQLite
 - NumPy
-- optional Gemini REST API
+- Gemini REST API + Google Search grounding
 - UniProt REST API
+- Ensembl REST API
 - vanilla HTML/CSS/JavaScript
 - GitHub Actions + `unittest`
 
-No Flask, FastAPI, Streamlit, or Gemini SDK is required for the current local version.
+No Flask, FastAPI, Streamlit, or Gemini SDK is required for the local version.
 
 ## Install
 
@@ -108,7 +130,7 @@ If your source ESM embeddings are `.pt` files, install PyTorch separately:
 pip install torch
 ```
 
-## Configure optional AI
+## Configure AI
 
 Copy the tracked configuration template into the ignored local `.env` file:
 
@@ -116,14 +138,14 @@ Copy the tracked configuration template into the ignored local `.env` file:
 cp config.example .env
 ```
 
-Then edit `.env` and set:
+Then set:
 
 ```text
 GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
-The app also accepts these as normal environment variables. Exact protein lookup works without a Gemini key.
+Exact protein lookup works without Gemini. Biological-question mode has deterministic fallbacks when AI or remote retrieval is unavailable.
 
 ## Build the private database
 
@@ -169,19 +191,13 @@ Open:
 http://127.0.0.1:5000
 ```
 
-The local server intentionally refuses non-loopback binding. Public deployment should put the application behind a proper hosted service rather than exposing the development server directly.
+The local server intentionally refuses non-loopback binding.
 
 ## Demo database
 
 ```bash
 python scripts/create_demo_db.py
 python app.py --db data/demo_zebrafish_esm.db
-```
-
-Then try a deterministic protein lookup such as:
-
-```text
-mpx
 ```
 
 The demo database is synthetic and is not the private production embedding set.
@@ -191,9 +207,9 @@ The demo database is synthetic and is not the private production embedding set.
 ```text
 GET /api/health
 GET /api/status
-GET /api/search?q=gata1a&k=20
-GET /api/discover?q=proteins%20involved%20in%20erythropoiesis&k=20
-GET /api/suggest?q=gat
+GET /api/search?q=mpeg1.1&k=20
+GET /api/discover?q=macrophage%20proteins&k=20
+GET /api/suggest?q=mpeg
 ```
 
 ## Tests
@@ -203,17 +219,4 @@ python -m unittest discover -s tests -v
 python -m py_compile app.py build_database.py
 ```
 
-The tests explicitly check that deterministic protein lookup remains functional without an AI key and that biological discovery ranks from validated seed indices rather than AI-generated gene guesses.
-
-## Next deployment step
-
-For a public portfolio demo, the intended topology is:
-
-```text
-public GitHub source
-→ hosted Python service
-→ private server-side ESM database / object storage
-→ browser receives ranked results only
-```
-
-The production deployment should add request limits, caching for UniProt/AI calls, deployment-specific secret management, and a persistent private storage layer for the real embeddings.
+Tests cover deterministic protein lookup, no-key fallback, Google-Search-backed species-scoped planning, exact local validation of AI zebrafish candidates, Ensembl orthology mapping, and validated-seed ESM ranking.

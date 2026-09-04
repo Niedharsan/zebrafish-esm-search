@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Zebrafish ESM dashboard with deterministic and AI-assisted discovery modes.
 
-The private embedding database stays server-side. Exact protein lookup and ESM
-similarity are deterministic. Optional Gemini integration is used only to turn
-natural-language biological questions into retrieval concepts and to explain
-already-ranked results. Seed proteins come from UniProt and must resolve back
-into the local zebrafish database before they can influence ranking.
+Exact protein lookup and ESM similarity remain deterministic. Biological-query
+mode is zebrafish-first: Gemini may use Google Search to identify relevant
+Danio rerio biology, but every final ESM seed must resolve to a protein in the
+local zebrafish database. When zebrafish evidence is sparse, human/mouse genes
+may be used only as reference evidence and are deterministically mapped to
+zebrafish orthologues with Ensembl before they can become seeds.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -34,9 +35,13 @@ HOST = "127.0.0.1"
 PORT = 5000
 DANIO_RERIO_TAXON_ID = 7955
 UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
+ENSEMBL_REST_URL = "https://rest.ensembl.org"
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 HTTP_TIMEOUT_SECONDS = 12
+UNIPROT_RESULTS_PER_TERM = 20
+MAX_DISCOVERY_SEEDS = 12
+MIN_ZEBRAFISH_SEEDS_BEFORE_ORTHOLOGY = 8
 
 PROTEINS: List[Dict[str, Any]] = []
 ID_TO_INDEX: Dict[str, int] = {}
@@ -46,7 +51,6 @@ SEARCH_TEXTS: List[str] = []
 
 
 def load_env_file(path: Path) -> None:
-    """Load simple KEY=VALUE pairs without adding a dependency."""
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -84,11 +88,8 @@ def connect_db() -> sqlite3.Connection:
 def load_database(db_path: str) -> None:
     global DB_PATH, PROTEINS, ID_TO_INDEX, NAME_TO_INDEX, VECTORS, SEARCH_TEXTS
     DB_PATH = db_path
-
     if not Path(DB_PATH).exists():
-        raise FileNotFoundError(
-            f"Database not found: {DB_PATH}. Build it first with build_database.py."
-        )
+        raise FileNotFoundError(f"Database not found: {DB_PATH}. Build it first with build_database.py.")
 
     conn = connect_db()
     rows = conn.execute(
@@ -99,17 +100,13 @@ def load_database(db_path: str) -> None:
         """
     ).fetchall()
     conn.close()
-
     if not rows:
         raise ValueError("Database contains no proteins.")
 
     proteins: List[Dict[str, Any]] = []
     vectors: List[np.ndarray] = []
-
     for row in rows:
-        blob = row["embedding"]
-        vec = np.frombuffer(blob, dtype=np.float32).copy()
-
+        vectors.append(np.frombuffer(row["embedding"], dtype=np.float32).copy())
         proteins.append(
             {
                 "protein_id": row["protein_id"] or "",
@@ -119,21 +116,12 @@ def load_database(db_path: str) -> None:
                 "extra_json": row["metadata_json"] or "{}",
             }
         )
-        vectors.append(vec)
 
     PROTEINS = proteins
     VECTORS = np.vstack(vectors).astype(np.float32, copy=False)
-    ID_TO_INDEX = {
-        p["protein_id"].strip().lower(): i for i, p in enumerate(PROTEINS) if p["protein_id"].strip()
-    }
-    NAME_TO_INDEX = {
-        p["name"].strip().lower(): i for i, p in enumerate(PROTEINS) if p["name"].strip()
-    }
-    SEARCH_TEXTS = [
-        " ".join([p["protein_id"], p["name"], p["description"]]).lower()
-        for p in PROTEINS
-    ]
-
+    ID_TO_INDEX = {p["protein_id"].strip().lower(): i for i, p in enumerate(PROTEINS) if p["protein_id"].strip()}
+    NAME_TO_INDEX = {p["name"].strip().lower(): i for i, p in enumerate(PROTEINS) if p["name"].strip()}
+    SEARCH_TEXTS = [" ".join([p["protein_id"], p["name"], p["description"]]).lower() for p in PROTEINS]
     print(f"Loaded {len(PROTEINS):,} proteins from {DB_PATH}. Vectors: {VECTORS.shape}")
 
 
@@ -159,7 +147,6 @@ def resolve_exact_identifier(value: str) -> Optional[int]:
 
 
 def resolve_query(query: str) -> Optional[Tuple[int, str, float]]:
-    """Resolve protein-oriented free text to the best local protein row index."""
     q = query.strip().lower()
     if not q:
         return None
@@ -176,8 +163,7 @@ def resolve_query(query: str) -> Optional[Tuple[int, str, float]]:
             p = PROTEINS[i]
             id_or_name = q in p["protein_id"].lower() or (p["name"] and q in p["name"].lower())
             boost = 0.45 if id_or_name else 0.0
-            score = min(0.96, len(q) / max(len(text), 1) + boost)
-            contains.append((score, i))
+            contains.append((min(0.96, len(q) / max(len(text), 1) + boost), i))
     if contains:
         contains.sort(reverse=True)
         return contains[0][1], "contains match", float(contains[0][0])
@@ -185,25 +171,22 @@ def resolve_query(query: str) -> Optional[Tuple[int, str, float]]:
     choices: List[str] = []
     choice_to_index: Dict[str, int] = {}
     for i, p in enumerate(PROTEINS):
-        for field in [p["protein_id"], p["name"]]:
+        for field in (p["protein_id"], p["name"]):
             if field:
                 key = field.lower()
                 choices.append(key)
                 choice_to_index[key] = i
     matches = difflib.get_close_matches(q, choices, n=1, cutoff=0.55)
-    if matches:
-        match = matches[0]
-        ratio = difflib.SequenceMatcher(a=q, b=match).ratio()
-        return choice_to_index[match], "fuzzy match", float(ratio)
-
-    return None
+    if not matches:
+        return None
+    match = matches[0]
+    return choice_to_index[match], "fuzzy match", float(difflib.SequenceMatcher(a=q, b=match).ratio())
 
 
 def nearest_neighbors(index: int, k: int) -> List[Dict[str, Any]]:
     if VECTORS is None:
         raise RuntimeError("Vectors are not loaded.")
-    query_vec = VECTORS[index]
-    sims = VECTORS @ query_vec
+    sims = VECTORS @ VECTORS[index]
     sims[index] = -np.inf
     k = max(1, min(k, len(PROTEINS) - 1))
     candidate_idx = np.argpartition(-sims, kth=k - 1)[:k]
@@ -216,10 +199,16 @@ def nearest_neighbors(index: int, k: int) -> List[Dict[str, Any]]:
     return out
 
 
+def parse_k(params: Dict[str, List[str]]) -> int:
+    try:
+        k = int((params.get("k") or ["20"])[0])
+    except ValueError:
+        k = 20
+    return max(1, min(k, 100))
+
+
 def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
     q = (params.get("q") or [""])[0].strip()
-    k = parse_k(params)
-
     resolved = resolve_query(q)
     if resolved is None:
         return {
@@ -229,7 +218,6 @@ def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
             "query": q,
             "results": [],
         }
-
     idx, method, match_score = resolved
     return {
         "ok": True,
@@ -238,22 +226,14 @@ def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
         "match_method": method,
         "match_score": round(match_score, 4),
         "matched_protein": protein_public(PROTEINS[idx]),
-        "results": nearest_neighbors(idx, k),
+        "results": nearest_neighbors(idx, parse_k(params)),
     }
-
-
-def parse_k(params: Dict[str, List[str]]) -> int:
-    try:
-        k = int((params.get("k") or ["20"])[0])
-    except ValueError:
-        k = 20
-    return max(1, min(k, 100))
 
 
 def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Optional[bytes] = None) -> Any:
     request_headers = {
         "Accept": "application/json",
-        "User-Agent": "zebrafish-esm-search/2.0",
+        "User-Agent": "zebrafish-esm-search/2.1",
         **(headers or {}),
     }
     req = Request(url, data=data, headers=request_headers, method="POST" if data is not None else "GET")
@@ -265,34 +245,6 @@ def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Opti
         raise RuntimeError(f"Remote service returned HTTP {exc.code}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"Remote service unavailable: {exc.reason}") from exc
-
-
-def _gemini_text(prompt: str) -> str:
-    key = gemini_api_key()
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
-    url = GEMINI_GENERATE_URL.format(model=gemini_model())
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.15,
-            "responseMimeType": "application/json",
-        },
-    }
-    response = _http_json(
-        url,
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-        data=json.dumps(payload).encode("utf-8"),
-    )
-    candidates = response.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini returned no candidate response.")
-    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
-    text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
-    if not text:
-        raise RuntimeError("Gemini returned an empty response.")
-    return text
 
 
 def _parse_json_object(text: str) -> Dict[str, Any]:
@@ -309,56 +261,120 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
     return data
 
 
+def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
+    key = gemini_api_key()
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    payload: Dict[str, Any] = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+    if use_google_search:
+        payload["tools"] = [{"google_search": {}}]
+
+    response = _http_json(
+        GEMINI_GENERATE_URL.format(model=gemini_model()),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        data=json.dumps(payload).encode("utf-8"),
+    )
+    candidates = response.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidate response.")
+    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+    text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response.")
+    return text
+
+
+def _clean_candidate_list(values: Any, *, allowed_species: Optional[set[str]] = None, limit: int = 8) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+    for raw in values or []:
+        if not isinstance(raw, dict):
+            continue
+        gene = str(raw.get("gene") or "").strip()
+        species = str(raw.get("species") or "zebrafish").strip().lower()
+        reason = str(raw.get("reason") or "").strip()[:400]
+        if allowed_species is not None and species not in allowed_species:
+            continue
+        key = (species, gene.lower())
+        if not gene or key in seen:
+            continue
+        seen.add(key)
+        out.append({"gene": gene[:80], "species": species, "reason": reason})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def interpret_biological_query(question: str) -> Dict[str, Any]:
-    """Use AI only to create retrieval concepts, never authoritative gene seeds."""
+    """Create a zebrafish-first, search-grounded biological retrieval plan."""
     question = question.strip()
     fallback = {
         "normalized_question": question,
         "retrieval_terms": [question],
-        "rationale": "Direct biological keyword retrieval (AI interpreter unavailable).",
+        "zebrafish_candidates": [],
+        "reference_candidates": [],
+        "rationale": "Direct zebrafish biological keyword retrieval (AI interpreter unavailable).",
         "ai_used": False,
+        "search_grounded": False,
     }
     if not ai_available():
         return fallback
 
-    prompt = f"""You are a query-planning component for a zebrafish protein discovery system.
-The user question is: {question!r}
+    prompt = f"""You are the biological-search planner for a DANIO RERIO (zebrafish) protein-discovery system.
+User question: {question!r}
 
-Convert the question into concise biological concepts that can be used as text queries against UniProt for Danio rerio.
-Do NOT propose, guess, or list gene symbols, protein IDs, UniProt accessions, or candidate proteins. Seed proteins are retrieved separately from UniProt.
-Return only JSON with this exact shape:
+Species policy:
+1. The final biological target is ALWAYS zebrafish / Danio rerio.
+2. Search zebrafish-specific evidence first. Prefer zebrafish cell markers, expression data, genetic studies, pathway annotations, ZFIN/UniProt/Ensembl resources, and zebrafish papers.
+3. For every web search you perform for primary evidence, include zebrafish or Danio rerio context. Do not let generic human search results define the zebrafish answer.
+4. If zebrafish evidence for a protein/pathway is sparse, you MAY use strong human or mouse evidence to identify plausible conserved reference genes. Report those separately. Do not claim they are zebrafish genes and do not invent the zebrafish ortholog; the application will map them deterministically with Ensembl.
+5. Prefer highly specific/directly relevant genes or proteins over broad generic pathway members. For a cell-type question, prioritize established zebrafish markers or highly enriched/specific genes when available.
+
+Use Google Search to research the question before answering. Return ONLY JSON with this shape:
 {{
-  "normalized_question": "short normalized question",
-  "retrieval_terms": ["3 to 5 short biological concepts"],
-  "rationale": "one sentence explaining the search interpretation"
+  "normalized_question": "zebrafish-specific normalized question",
+  "retrieval_terms": ["3 to 5 concise zebrafish biological search concepts"],
+  "zebrafish_candidates": [
+    {{"gene": "Danio rerio gene symbol", "species": "zebrafish", "reason": "brief zebrafish-specific evidence/relevance"}}
+  ],
+  "reference_candidates": [
+    {{"gene": "human or mouse gene symbol", "species": "human or mouse", "reason": "why mammalian evidence is useful because zebrafish evidence is sparse"}}
+  ],
+  "rationale": "one or two sentences"
 }}
-Prefer pathway, process, cell-type, phenotype, molecular-function, or biological-role language that is likely to occur in curated protein annotations.
+
+Give up to 8 strong zebrafish candidates. Only use reference_candidates when useful; zebrafish evidence takes priority.
 """
     try:
-        data = _parse_json_object(_gemini_text(prompt))
-        terms = []
+        data = _parse_json_object(_gemini_text(prompt, use_google_search=True))
+        terms: List[str] = []
         for value in data.get("retrieval_terms") or []:
             term = str(value).strip()
             if term and term.lower() not in {x.lower() for x in terms}:
-                terms.append(term[:100])
+                terms.append(term[:120])
         if not terms:
-            return fallback
+            terms = [question]
         return {
             "normalized_question": str(data.get("normalized_question") or question).strip()[:240],
             "retrieval_terms": terms[:5],
-            "rationale": str(data.get("rationale") or "AI-generated biological retrieval plan.").strip()[:500],
+            "zebrafish_candidates": _clean_candidate_list(data.get("zebrafish_candidates"), allowed_species={"zebrafish", "danio rerio"}, limit=8),
+            "reference_candidates": _clean_candidate_list(data.get("reference_candidates"), allowed_species={"human", "mouse"}, limit=6),
+            "rationale": str(data.get("rationale") or "Zebrafish-first grounded search plan.").strip()[:600],
             "ai_used": True,
+            "search_grounded": True,
         }
     except Exception as exc:
-        fallback["rationale"] = f"AI interpreter unavailable; used direct retrieval instead. ({exc})"
+        fallback["rationale"] = f"AI search unavailable; used zebrafish-only direct retrieval instead. ({exc})"
         return fallback
 
 
 def _primary_gene_name(uniprot_record: Dict[str, Any]) -> str:
-    genes = uniprot_record.get("genes") or []
-    for gene in genes:
-        gene_name = (gene or {}).get("geneName") or {}
-        value = str(gene_name.get("value") or "").strip()
+    for gene in uniprot_record.get("genes") or []:
+        value = str(((gene or {}).get("geneName") or {}).get("value") or "").strip()
         if value:
             return value
     return ""
@@ -380,11 +396,38 @@ def _protein_description(uniprot_record: Dict[str, Any]) -> str:
     return ""
 
 
-def fetch_uniprot_seeds(terms: Iterable[str], *, per_term: int = 6) -> List[Dict[str, Any]]:
-    """Retrieve Danio rerio proteins from UniProt, then require exact local resolution."""
+def validate_ai_zebrafish_candidates(candidates: Iterable[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """AI may nominate genes, but only exact local zebrafish identities become seeds."""
+    seeds: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        gene = str(candidate.get("gene") or "").strip()
+        idx = resolve_exact_identifier(gene)
+        if idx is None or idx in seen:
+            continue
+        seen.add(idx)
+        seeds.append(
+            {
+                "index": idx,
+                "source": "Gemini Google Search (zebrafish)",
+                "retrieval_term": gene,
+                "resolved_by": "exact local zebrafish gene",
+                "evidence_class": "zebrafish-supported",
+                "ai_reason": candidate.get("reason") or "",
+            }
+        )
+    return seeds
+
+
+def fetch_uniprot_seeds(
+    terms: Iterable[str],
+    *,
+    per_term: int = UNIPROT_RESULTS_PER_TERM,
+    max_seeds: int = MAX_DISCOVERY_SEEDS,
+) -> List[Dict[str, Any]]:
+    """Retrieve deeper Danio rerio UniProt results and validate them locally."""
     seeds: List[Dict[str, Any]] = []
     seen_local: set[int] = set()
-
     for term in terms:
         query = f"(organism_id:{DANIO_RERIO_TAXON_ID}) AND ({term})"
         params = urlencode(
@@ -400,38 +443,112 @@ def fetch_uniprot_seeds(terms: Iterable[str], *, per_term: int = 6) -> List[Dict
             accession = str(record.get("primaryAccession") or "").strip()
             gene_name = _primary_gene_name(record)
             protein_name = _protein_description(record)
-
             local_index: Optional[int] = None
             resolved_by = ""
             for label, candidate in (("gene name", gene_name), ("UniProt accession", accession)):
-                if not candidate:
-                    continue
-                local_index = resolve_exact_identifier(candidate)
-                if local_index is not None:
-                    resolved_by = label
-                    break
-
+                if candidate:
+                    local_index = resolve_exact_identifier(candidate)
+                    if local_index is not None:
+                        resolved_by = label
+                        break
             if local_index is None or local_index in seen_local:
                 continue
             seen_local.add(local_index)
             seeds.append(
                 {
                     "index": local_index,
-                    "source": "UniProt",
+                    "source": "UniProt zebrafish search",
                     "retrieval_term": term,
                     "uniprot_accession": accession,
                     "uniprot_gene": gene_name,
                     "uniprot_protein_name": protein_name,
                     "resolved_by": resolved_by,
+                    "evidence_class": "zebrafish-supported",
                 }
             )
-            if len(seeds) >= 10:
+            if len(seeds) >= max_seeds:
                 return seeds
     return seeds
 
 
+def _ensembl_zebrafish_ortholog_symbols(source_species: str, gene: str) -> List[str]:
+    species_map = {"human": "homo_sapiens", "mouse": "mus_musculus"}
+    ensembl_species = species_map.get(source_species.lower())
+    if not ensembl_species:
+        return []
+
+    params = urlencode({"target_species": "danio_rerio", "type": "orthologues", "format": "condensed", "sequence": "none"})
+    payload = _http_json(
+        f"{ENSEMBL_REST_URL}/homology/symbol/{quote(ensembl_species)}/{quote(gene)}?{params}",
+        headers={"Content-Type": "application/json"},
+    )
+    symbols: List[str] = []
+    seen: set[str] = set()
+    for datum in payload.get("data") or []:
+        for homology in (datum or {}).get("homologies") or []:
+            target = (homology or {}).get("target") or {}
+            direct_symbol = ""
+            target_id = ""
+            if isinstance(target, dict):
+                direct_symbol = str(target.get("display_id") or target.get("display_name") or "").strip()
+                target_id = str(target.get("id") or "").strip()
+            elif isinstance(target, str):
+                target_id = target.strip()
+
+            if direct_symbol and direct_symbol.lower() not in seen:
+                seen.add(direct_symbol.lower())
+                symbols.append(direct_symbol)
+                continue
+            if not target_id:
+                continue
+            try:
+                lookup = _http_json(
+                    f"{ENSEMBL_REST_URL}/lookup/id/{quote(target_id)}?content-type=application/json",
+                    headers={"Content-Type": "application/json"},
+                )
+                symbol = str(lookup.get("display_name") or "").strip()
+            except Exception:
+                symbol = ""
+            if symbol and symbol.lower() not in seen:
+                seen.add(symbol.lower())
+                symbols.append(symbol)
+    return symbols
+
+
+def orthology_seeds(reference_candidates: Iterable[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Map mammalian reference evidence to exact local Danio rerio proteins."""
+    seeds: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for candidate in reference_candidates:
+        source_species = str(candidate.get("species") or "").lower()
+        source_gene = str(candidate.get("gene") or "").strip()
+        if source_species not in {"human", "mouse"} or not source_gene:
+            continue
+        try:
+            zebrafish_symbols = _ensembl_zebrafish_ortholog_symbols(source_species, source_gene)
+        except Exception:
+            continue
+        for symbol in zebrafish_symbols:
+            idx = resolve_exact_identifier(symbol)
+            if idx is None or idx in seen:
+                continue
+            seen.add(idx)
+            seeds.append(
+                {
+                    "index": idx,
+                    "source": f"Ensembl orthology ({source_species} → zebrafish)",
+                    "retrieval_term": source_gene,
+                    "resolved_by": f"{source_gene} → {symbol}; exact local zebrafish gene",
+                    "evidence_class": "mammalian evidence + zebrafish orthology",
+                    "reference_species": source_species,
+                    "reference_gene": source_gene,
+                    "ai_reason": candidate.get("reason") or "",
+                }
+            )
+    return seeds
+
+
 def local_annotation_seeds(terms: Iterable[str], *, limit: int = 6) -> List[Dict[str, Any]]:
-    """Deterministic fallback when UniProt is unavailable or yields no local matches."""
     scored: List[Tuple[float, int, str]] = []
     for term in terms:
         tokens = [t for t in re.findall(r"[a-z0-9]+", term.lower()) if len(t) >= 4]
@@ -440,10 +557,8 @@ def local_annotation_seeds(terms: Iterable[str], *, limit: int = 6) -> List[Dict
         for idx, text in enumerate(SEARCH_TEXTS):
             hits = sum(1 for token in tokens if token in text)
             if hits:
-                score = hits / len(tokens)
-                scored.append((score, idx, term))
+                scored.append((hits / len(tokens), idx, term))
     scored.sort(key=lambda item: item[0], reverse=True)
-
     out: List[Dict[str, Any]] = []
     seen: set[int] = set()
     for score, idx, term in scored:
@@ -453,9 +568,10 @@ def local_annotation_seeds(terms: Iterable[str], *, limit: int = 6) -> List[Dict
         out.append(
             {
                 "index": idx,
-                "source": "local annotation fallback",
+                "source": "local zebrafish annotation fallback",
                 "retrieval_term": term,
                 "resolved_by": f"annotation token overlap ({score:.2f})",
+                "evidence_class": "zebrafish local annotation",
             }
         )
         if len(out) >= limit:
@@ -463,28 +579,38 @@ def local_annotation_seeds(terms: Iterable[str], *, limit: int = 6) -> List[Dict
     return out
 
 
+def _merge_seeds(*groups: Iterable[Dict[str, Any]], limit: int = MAX_DISCOVERY_SEEDS) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for group in groups:
+        for seed in group:
+            idx = int(seed["index"])
+            if idx in seen:
+                continue
+            seen.add(idx)
+            out.append(seed)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def discovery_neighbors(seed_indices: List[int], k: int) -> List[Dict[str, Any]]:
-    """Rank proteins by best ESM similarity to any validated seed protein."""
     if VECTORS is None:
         raise RuntimeError("Vectors are not loaded.")
     if not seed_indices:
         return []
-
     unique_seed_indices = list(dict.fromkeys(seed_indices))
-    seed_matrix = VECTORS[unique_seed_indices]
-    similarities = VECTORS @ seed_matrix.T
+    similarities = VECTORS @ VECTORS[unique_seed_indices].T
     best_seed_column = np.argmax(similarities, axis=1)
     best_scores = np.max(similarities, axis=1)
     for idx in unique_seed_indices:
         best_scores[idx] = -np.inf
-
     available = len(PROTEINS) - len(unique_seed_indices)
     if available <= 0:
         return []
     k = max(1, min(k, available))
     candidate_idx = np.argpartition(-best_scores, kth=k - 1)[:k]
     ordered_idx = candidate_idx[np.argsort(-best_scores[candidate_idx])]
-
     out: List[Dict[str, Any]] = []
     for rank, idx_value in enumerate(ordered_idx, start=1):
         idx = int(idx_value)
@@ -506,11 +632,18 @@ def discovery_neighbors(seed_indices: List[int], k: int) -> List[Dict[str, Any]]
 def explain_discovery(question: str, plan: Dict[str, Any], seeds: List[Dict[str, Any]], results: List[Dict[str, Any]]) -> Optional[str]:
     if not ai_available() or not results:
         return None
-
     compact_seeds = []
-    for seed in seeds[:8]:
+    for seed in seeds[:10]:
         p = protein_public(PROTEINS[int(seed["index"])])
-        compact_seeds.append({"gene": p["name"], "protein_id": p["protein_id"], "description": p["description"]})
+        compact_seeds.append(
+            {
+                "gene": p["name"],
+                "protein_id": p["protein_id"],
+                "description": p["description"],
+                "source": seed.get("source"),
+                "evidence_class": seed.get("evidence_class"),
+            }
+        )
     compact_results = [
         {
             "gene": r.get("name"),
@@ -521,15 +654,13 @@ def explain_discovery(question: str, plan: Dict[str, Any], seeds: List[Dict[str,
         }
         for r in results[:8]
     ]
-
-    prompt = f"""You are explaining results from a zebrafish ESM protein-similarity search.
+    prompt = f"""Explain a DANIO RERIO zebrafish ESM protein-similarity result.
 Question: {question}
-Retrieval plan: {json.dumps(plan, ensure_ascii=False)}
-Validated seed proteins: {json.dumps(compact_seeds, ensure_ascii=False)}
-Top ranked candidates: {json.dumps(compact_results, ensure_ascii=False)}
-
+Plan: {json.dumps(plan, ensure_ascii=False)}
+Validated zebrafish seeds: {json.dumps(compact_seeds, ensure_ascii=False)}
+Top ESM candidates: {json.dumps(compact_results, ensure_ascii=False)}
 Return only JSON: {{"summary": "2-4 concise sentences"}}.
-Explain what the ranking suggests, but do not claim functional proof from ESM similarity alone. Do not invent annotations not present above. Clearly distinguish sequence/representation similarity from evidence of biological function.
+Keep the interpretation zebrafish-specific. Distinguish direct zebrafish evidence from mammalian evidence transferred through orthology. Do not claim functional proof from ESM similarity alone and do not invent annotations.
 """
     try:
         data = _parse_json_object(_gemini_text(prompt))
@@ -541,18 +672,25 @@ Explain what the ranking suggests, but do not claim functional proof from ESM si
 
 def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
     question = (params.get("q") or [""])[0].strip()
-    k = parse_k(params)
     if not question:
         return {"ok": False, "mode": "discovery", "message": "Enter a biological question.", "results": []}
 
     plan = interpret_biological_query(question)
+    direct_ai_seeds = validate_ai_zebrafish_candidates(plan.get("zebrafish_candidates") or [])
+
     retrieval_error: Optional[str] = None
     try:
-        seeds = fetch_uniprot_seeds(plan["retrieval_terms"])
+        uniprot_seeds = fetch_uniprot_seeds(plan["retrieval_terms"])
     except Exception as exc:
         retrieval_error = str(exc)
-        seeds = []
+        uniprot_seeds = []
 
+    zebrafish_seeds = _merge_seeds(direct_ai_seeds, uniprot_seeds)
+    mapped_reference_seeds: List[Dict[str, Any]] = []
+    if len(zebrafish_seeds) < MIN_ZEBRAFISH_SEEDS_BEFORE_ORTHOLOGY and plan.get("reference_candidates"):
+        mapped_reference_seeds = orthology_seeds(plan["reference_candidates"])
+
+    seeds = _merge_seeds(zebrafish_seeds, mapped_reference_seeds)
     if not seeds:
         seeds = local_annotation_seeds(plan["retrieval_terms"])
 
@@ -569,8 +707,8 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
             "results": [],
         }
 
-    results = discovery_neighbors([int(seed["index"]) for seed in seeds], k)
-    public_seeds = []
+    results = discovery_neighbors([int(seed["index"]) for seed in seeds], parse_k(params))
+    public_seeds: List[Dict[str, Any]] = []
     for seed in seeds:
         p = protein_public(PROTEINS[int(seed["index"])])
         public_seeds.append(
@@ -580,20 +718,25 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
                 "retrieval_term": seed.get("retrieval_term"),
                 "resolved_by": seed.get("resolved_by"),
                 "uniprot_accession": seed.get("uniprot_accession"),
+                "evidence_class": seed.get("evidence_class"),
+                "reference_species": seed.get("reference_species"),
+                "reference_gene": seed.get("reference_gene"),
+                "ai_reason": seed.get("ai_reason"),
             }
         )
 
+    source_names = list(dict.fromkeys(str(seed.get("source")) for seed in seeds if seed.get("source")))
     return {
         "ok": True,
         "mode": "discovery",
         "query": question,
         "plan": plan,
-        "seed_source": "UniProt validated against local DB" if any(seed.get("source") == "UniProt" for seed in seeds) else "local annotation fallback",
+        "seed_source": "Zebrafish-first: " + "; ".join(source_names),
         "retrieval_warning": retrieval_error,
         "seeds": public_seeds,
         "results": results,
         "ai_explanation": explain_discovery(question, plan, seeds, results),
-        "privacy": "Embeddings remain server-side. Gemini receives only the question and compact protein metadata, never embedding vectors or database credentials.",
+        "privacy": "Embeddings remain server-side. Gemini receives the biological question and compact protein metadata, never embedding vectors or database credentials.",
     }
 
 
@@ -617,12 +760,14 @@ def status_api() -> Dict[str, Any]:
         "protein_count": len(PROTEINS),
         "ai_available": ai_available(),
         "ai_model": gemini_model() if ai_available() else None,
+        "species_scope": "Danio rerio",
+        "google_search_grounding": ai_available(),
         "embedding_egress": False,
     }
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "ZebrafishESMDashboard/2.0"
+    server_version = "ZebrafishESMDashboard/2.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -637,18 +782,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def send_json(self, payload: Any, status: int = 200) -> None:
-        data = json.dumps(payload).encode("utf-8")
-        self.send_bytes(data, "application/json; charset=utf-8", status=status)
+        self.send_bytes(json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8", status=status)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         params = parse_qs(parsed.query)
-
         try:
             if path == "/":
                 self.serve_index()
-            elif path == "/api/health" or path == "/api/status":
+            elif path in {"/api/health", "/api/status"}:
                 self.send_json(status_api())
             elif path == "/api/search":
                 self.send_json(search_api(params))
@@ -664,8 +807,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "message": str(exc)}, status=500)
 
     def serve_index(self) -> None:
-        template_path = ROOT / "templates" / "index.html"
-        text = template_path.read_text(encoding="utf-8")
+        text = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         text = text.replace("{{ '{:,}'.format(protein_count) }}", f"{len(PROTEINS):,}")
         text = text.replace("{{ db_path }}", html.escape(DB_PATH))
         text = text.replace("{{ url_for('static', filename='styles.css') }}", "/static/styles.css")
@@ -681,8 +823,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not target.exists() or not target.is_file():
             self.send_json({"ok": False, "message": "Static file not found"}, status=404)
             return
-        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        self.send_bytes(target.read_bytes(), content_type)
+        self.send_bytes(target.read_bytes(), mimetypes.guess_type(str(target))[0] or "application/octet-stream")
 
 
 def parse_args() -> argparse.Namespace:
@@ -701,6 +842,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Open http://{args.host}:{args.port}")
     print(f"AI interpreter: {'enabled (' + gemini_model() + ')' if ai_available() else 'disabled; deterministic modes still work'}")
+    print("Biological discovery species scope: Danio rerio (zebrafish-first; mammalian orthology fallback only when needed)")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
