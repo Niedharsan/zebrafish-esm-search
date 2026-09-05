@@ -22,9 +22,31 @@ DEFAULT_CASES = [
 
 
 def run_case(query: str, expected_gene: str | None, k: int) -> Dict[str, Any]:
-    result = app.discovery_api({"q": [query], "k": [str(k)]})
-    plan = result.get("plan") or {}
-    seeds = result.get("seeds") or []
+    plan = app.interpret_biological_query(query)
+    direct, resolution_trace, resolution_errors = app.resolve_targeted_uniprot_candidates(
+        plan.get("zebrafish_candidates") or []
+    )
+    references = app.orthology_seeds(plan.get("reference_candidates") or []) if len(direct) < 4 else []
+    resolved = app._merge_seeds(direct, references)
+    seeds = []
+    for seed in resolved:
+        seeds.append(
+            {
+                **app.protein_public(app.PROTEINS[int(seed["index"])]),
+                "source": seed.get("source"),
+                "retrieval_term": seed.get("retrieval_term"),
+                "resolved_by": seed.get("resolved_by"),
+                "uniprot_accession": seed.get("uniprot_accession"),
+                "ai_reason": seed.get("ai_reason"),
+            }
+        )
+    result = {
+        "ok": bool(seeds),
+        "plan": app._public_plan(plan),
+        "seeds": seeds,
+        "results": app.discovery_neighbors([int(seed["index"]) for seed in resolved], k) if resolved else [],
+        "retrieval_warning": "; ".join(resolution_errors) or None,
+    }
     names = [str(seed.get("name") or "").lower() for seed in seeds]
 
     checks = [
@@ -41,6 +63,8 @@ def run_case(query: str, expected_gene: str | None, k: int) -> Dict[str, Any]:
     return {
         "query": query,
         "result": result,
+        "research_note": plan.get("_research_note") or "",
+        "resolution_trace": resolution_trace,
         "checks": checks,
         "passed": all(ok for _, ok in checks),
     }
@@ -57,7 +81,27 @@ def print_report(report: Dict[str, Any]) -> None:
     if result.get("retrieval_warning"):
         print(f"retrieval_warning: {result['retrieval_warning']}")
 
-    print("\nFinal validated seeds:")
+    print("\n1. Gemini grounded ranked biological terms:")
+    for rank, candidate in enumerate(plan.get("zebrafish_candidates") or [], 1):
+        print(f"  {rank:>2}. {candidate.get('gene')}: {candidate.get('reason')}")
+
+    print("\n2-3. Targeted UniProt resolution (accepted/rejected):")
+    for trace in report.get("resolution_trace") or []:
+        print(f"  term={trace.get('term')}")
+        for record in trace.get("records") or []:
+            decision = "ACCEPT" if record.get("accepted") else "REJECT"
+            print(
+                f"    [{decision}] rank={record.get('search_rank')} gene={record.get('gene') or '-'} "
+                f"accession={record.get('uniprot_accession') or '-'} reason={record.get('decision')}"
+            )
+        local = trace.get("local_resolution") or {}
+        protein = local.get("protein") or {}
+        print(
+            f"    local={protein.get('name') or 'unresolved'} "
+            f"id={protein.get('protein_id') or '-'} via={local.get('resolved_by') or '-'}"
+        )
+
+    print("\n4-5. Final validated ESM seeds:")
     for rank, seed in enumerate(result.get("seeds") or [], 1):
         print(
             f"  {rank:>2}. {str(seed.get('name') or seed.get('protein_id')):<18} "
