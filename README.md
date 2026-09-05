@@ -1,14 +1,14 @@
 # Zebrafish ESM Search
 
-A dual-mode zebrafish protein discovery dashboard that combines a private ESM embedding database with an evidence-aware AI retrieval layer.
+A local zebrafish protein-discovery dashboard that combines a private ESM embedding database with a small AI research layer.
 
-> **AI decides what evidence matters for the biological question. Deterministic systems control species identity, identifier resolution, orthology mapping, local protein identity, and ESM similarity.**
+> **Gemini does the biological reasoning. Deterministic code only controls protein identity, zebrafish validation, orthology fallback, and ESM similarity.**
 
-The real embedding database is never committed to this repository and embedding vectors are never sent to the browser or to Gemini.
+The real embedding database is not committed to this repository and raw embeddings are never sent to Gemini or the browser.
 
-## Two search modes
+## Two modes
 
-### 1. Protein lookup — deterministic
+### 1. Protein lookup
 
 Examples:
 
@@ -23,14 +23,14 @@ Flow:
 
 ```text
 local identity resolution
-→ private ESM embedding database
+→ private ESM database
 → cosine similarity
 → ranked zebrafish proteins
 ```
 
-No AI is required.
+This path is deterministic and does not require AI.
 
-### 2. Biological question — evidence-aware zebrafish discovery
+### 2. Biological question
 
 Examples:
 
@@ -39,141 +39,42 @@ macrophage proteins
 Wnt signaling proteins
 proteins involved in autophagy
 proteins expressed in the heart
-proteins associated with fin regeneration
-proteins that bind actin
 ```
 
 Flow:
 
 ```text
-natural-language question
-→ Gemini classifies the biological question type and proposes retrieval concepts only
-→ UniProtKB is queried directly for Danio rerio records and annotations
-→ each UniProt hit is decomposed into evidence types instead of treating search position as biological rank
-→ Ensembl resolves zebrafish symbols/identifiers and aliases
-→ Gemini + Google Search gathers independent zebrafish evidence from ZFIN, literature, expression, pathway, phenotype, and other relevant sources
-→ Gemini ranks candidates using evidence appropriate to the question type
-→ every candidate must still resolve deterministically into the local zebrafish protein database
-→ if zebrafish evidence is sparse, human/mouse reference genes may be mapped to zebrafish orthologues through Ensembl
-→ private ESM similarity expands from the validated zebrafish seeds
-→ optional Gemini explanation of the ranked results
+user question
+→ simple Danio rerio UniProt retrieval
+→ Gemini + Google Search researches the biology
+→ Gemini ranks the strongest zebrafish candidates
+→ deterministic local zebrafish validation
+→ optional human/mouse → zebrafish Ensembl orthology fallback
+→ private ESM similarity expansion
 ```
 
-## Evidence-aware ranking
+There is deliberately **no hand-built question-type classifier, biological evidence taxonomy, or weighted relevance engine**.
 
-A database search hit is not automatically treated as biological evidence.
+UniProt search order is only retrieval context. Gemini is explicitly told that a hit may rank highly just because the query word occurs in the protein name, and that it must use independent zebrafish evidence to decide biological relevance.
 
-For example, a UniProt search for `macrophage` can rank `mpeg1.1` highly because the protein name contains **Macrophage-expressed gene 1**. The application records that as:
-
-```text
-name_match
-```
-
-not as evidence of high expression or macrophage specificity.
-
-Structured UniProt evidence can instead be labelled as:
-
-```text
-name_match
-function_annotation
-pathway_annotation
-expression_annotation
-phenotype_annotation
-go_biological_process
-go_molecular_function
-go_cellular_component
-```
-
-The AI then interprets those evidence classes together with independent grounded zebrafish evidence.
-
-The importance of each evidence type depends on the question:
-
-- **cell type / tissue** — marker, expression, enrichment, and direct biological evidence matter most;
-- **pathway / biological process** — curated pathway, GO biological process, functional and experimental evidence matter most;
-- **molecular function** — GO molecular function and direct functional annotation matter most;
-- **phenotype** — genetic, phenotype, ZFIN, and experimental evidence matter most;
-- **protein family / other questions** — the planner chooses an appropriate evidence policy for the request.
-
-A lexical protein-name match is always treated as weak supporting evidence unless another source independently supports the biological interpretation.
-
-## Identifier resolution
-
-Candidate ranking and protein identity are separate steps.
-
-A model-generated name is never accepted simply because Gemini produced it. Candidate resolution can use:
-
-```text
-exact local zebrafish gene symbol
-exact local UniProt accession
-UniProt evidence-linked gene/accession
-Ensembl zebrafish symbol or synonym resolution
-```
-
-Only after one of those routes resolves to an exact protein in the local 22,523-protein database can the candidate become an ESM seed.
-
-This also handles cases where biological sources use a broader/older symbol while the local database contains the current zebrafish symbol.
+For example, a UniProt search for `macrophage` may surface `mpeg1.1` because its protein name contains “Macrophage-expressed gene 1”. That lexical match is useful for retrieval, but Gemini still has to check the zebrafish biology before ranking it.
 
 ## Species policy
 
-- Final search space and final ESM seeds are always **Danio rerio**.
-- Zebrafish-specific evidence is searched and prioritized first.
-- Human/mouse evidence is allowed only when zebrafish evidence is sparse or useful as conserved reference biology.
-- Mammalian genes cannot enter the ESM search directly.
-- Mammalian genes must first be mapped to zebrafish orthologues through Ensembl and then resolve into the local zebrafish database.
-- Seed provenance and evidence classes are retained.
+- Final ESM seeds are always **Danio rerio** proteins.
+- Gemini searches zebrafish evidence first.
+- Human/mouse evidence is only a fallback when zebrafish evidence is sparse.
+- Mammalian genes cannot enter the ESM search directly; they must first map to zebrafish orthologues through Ensembl.
+- Every final seed must resolve into the local zebrafish protein database.
 
-## Grounding and retrieval
+## Privacy
 
-Biological discovery uses complementary evidence routes:
+- `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` files stay local/private.
+- `GEMINI_API_KEY` stays server-side.
+- Gemini receives the biological question and compact public UniProt metadata, not embedding vectors or database credentials.
+- The browser receives protein metadata and similarity results, not raw embeddings.
 
-1. **UniProtKB structured zebrafish retrieval** — gene/protein names plus function, pathway, expression, phenotype, and GO annotations.
-2. **Ensembl structured identifier resolution** — canonical zebrafish symbols, Ensembl IDs, synonyms/aliases, and cross-species orthology.
-3. **Gemini Google Search grounding** — independent zebrafish evidence from ZFIN, primary literature, expression/single-cell resources, pathway resources, phenotype studies, and other authoritative sources.
-4. **Local deterministic validation** — every final candidate must map to a protein in the private zebrafish ESM database.
-
-UniProt search order is explicitly preserved only as retrieval metadata. It is never treated as the final biological ranking.
-
-## Privacy / data-egress boundary
-
-- real `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` artifacts stay private;
-- the browser receives ranked protein metadata, never raw embeddings;
-- `GEMINI_API_KEY` remains server-side;
-- Gemini receives biological questions and compact biological evidence, never embedding vectors or database credentials;
-- UniProt and Ensembl receive only ordinary public biological identifiers/search terms.
-
-## Architecture
-
-```text
-Browser UI
-   │
-   ├── Protein lookup
-   │      └── local resolver → NumPy/SQLite ESM similarity
-   │
-   └── Biological question
-          │
-          ├── Gemini retrieval planner
-          │      └── question type + search concepts + evidence priorities
-          │
-          ├── UniProtKB Danio rerio structured retrieval
-          │      └── evidence-type extraction
-          │
-          ├── Ensembl zebrafish identifier resolution
-          │
-          ├── Gemini + Google Search
-          │      └── independent zebrafish evidence / ZFIN / literature
-          │
-          └── evidence-aware Gemini candidate ranking
-                    ↓
-          deterministic local zebrafish resolution
-                    ↓
-           optional mammalian orthology fallback
-                    ↓
-               private ESM similarity
-                    ↓
-            optional Gemini explanation
-```
-
-Current stack:
+## Stack
 
 - Python standard-library HTTP server
 - SQLite
@@ -184,8 +85,6 @@ Current stack:
 - vanilla HTML/CSS/JavaScript
 - GitHub Actions + `unittest`
 
-No Flask, FastAPI, Streamlit, or Gemini SDK is required for the local version.
-
 ## Install
 
 ```bash
@@ -194,32 +93,36 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If your source ESM embeddings are `.pt` files, install PyTorch separately:
-
-```bash
-pip install torch
-```
-
 ## Configure AI
-
-Copy the tracked configuration template into the ignored local `.env` file:
 
 ```bash
 cp config.example .env
 ```
 
-Then set:
+Set:
 
 ```text
 GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
-Exact protein lookup works without Gemini. Biological-question mode has deterministic fallbacks when AI or remote retrieval is unavailable.
+Exact protein lookup works without Gemini.
+
+## Run locally
+
+```bash
+python app.py --db data/zebrafish_esm.db
+```
+
+or on macOS:
+
+```bash
+./start_dashboard.command
+```
 
 ## Build the private database
 
-### From `.npy` embeddings + metadata CSV
+Example:
 
 ```bash
 python build_database.py \
@@ -231,62 +134,30 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-### From `.npz`
+## Live integration test
+
+This uses your local `.env` and private database and makes real Gemini + Google Search + UniProt calls:
 
 ```bash
-python build_database.py \
-  --embeddings /path/to/embeddings.npz \
-  --metadata /path/to/metadata.csv \
-  --out-db data/zebrafish_esm.db
+.venv/bin/python scripts/live_integration_test.py
 ```
 
-### From an ESM `.pt` directory
-
-```bash
-python build_database.py \
-  --pt-dir /path/to/esm_pt_files \
-  --metadata /path/to/metadata.csv \
-  --out-db data/zebrafish_esm.db
-```
-
-## Run locally
-
-```bash
-python app.py --db data/zebrafish_esm.db
-```
-
-Open:
+The default checks include:
 
 ```text
-http://127.0.0.1:5000
+macrophage proteins
+Wnt signaling proteins
 ```
 
-The local server intentionally refuses non-loopback binding.
+For the macrophage case, the script explicitly checks that `mpeg1.1` reaches the final validated seed set.
 
-## Demo database
+The live test is intentionally not run in public CI because it needs your private local API key and database.
 
-```bash
-python scripts/create_demo_db.py
-python app.py --db data/demo_zebrafish_esm.db
-```
-
-The demo database is synthetic and is not the private production embedding set.
-
-## API routes
-
-```text
-GET /api/health
-GET /api/status
-GET /api/search?q=mpeg1.1&k=20
-GET /api/discover?q=macrophage%20proteins&k=20
-GET /api/suggest?q=mpeg
-```
-
-## Tests
+## Normal tests
 
 ```bash
 python -m unittest discover -s tests -v
 python -m py_compile app.py build_database.py
 ```
 
-Tests cover deterministic protein lookup, no-key fallback, Google Search payload compatibility, evidence-type extraction, separation of lexical name matches from biological evidence, GO/process evidence, Ensembl alias resolution, UniProt accession resolution, question-type-aware retrieval planning, cross-species orthology, prevention of raw UniProt filler seeds, and validated-seed ESM ranking.
+The regression suite checks deterministic protein lookup, Gemini grounding payloads, simple zebrafish UniProt retrieval, AI-first ranking, UniProt synonym/accession resolution, mammalian orthology fallback, and ESM ranking.
