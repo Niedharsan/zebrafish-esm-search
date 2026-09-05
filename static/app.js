@@ -48,16 +48,16 @@ function setMode(mode) {
 
   if (mode === 'protein') {
     queryLabel.textContent = 'Protein / gene name / ID';
-    queryInput.placeholder = 'Example: gata1a, mpx, ENSDARP...';
-    modeHelp.textContent = 'Deterministic identity resolution → ESM cosine similarity.';
-    resultsTitle.textContent = 'Similar proteins';
+    queryInput.placeholder = 'Example: gata1a, mpx, Q7SXE0...';
+    modeHelp.textContent = 'Find a protein and view its closest matches in ESM embedding space.';
+    resultsTitle.textContent = 'ESM-similar proteins';
     searchButton.textContent = 'Search';
     showMessage('Enter a protein name to begin.');
   } else {
     queryLabel.textContent = 'Biological question';
     queryInput.placeholder = 'Example: proteins involved in erythropoiesis';
-    modeHelp.textContent = 'AI interprets the concept → UniProt retrieves zebrafish seeds → local ESM ranks related proteins.';
-    resultsTitle.textContent = 'ESM discovery candidates';
+    modeHelp.textContent = 'Gemini uses UniProt and Ensembl APIs to identify zebrafish proteins, then ESM searches the whole-proteome embedding space.';
+    resultsTitle.textContent = 'ESM-similar proteins';
     searchButton.textContent = 'Discover';
     showMessage('Ask a biological question to begin.');
   }
@@ -68,7 +68,7 @@ function renderMatch(data) {
   matchPanel.innerHTML = `
     <div class="match-grid">
       <div>
-        <div class="kicker">Matched query protein</div>
+        <div class="kicker">Matched protein</div>
         <strong>${escapeHtml(p.name || p.protein_id)}</strong>
         <p class="mono">${escapeHtml(p.protein_id)}</p>
       </div>
@@ -102,20 +102,20 @@ function renderDiscovery(data) {
   discoveryPanel.innerHTML = `
     <div class="discovery-grid">
       <div>
-        <div class="kicker">Interpreted biological query</div>
+        <div class="kicker">Biological question</div>
         <strong>${escapeHtml(plan.normalized_question || data.query)}</strong>
         <p>${escapeHtml(plan.rationale || '')}</p>
         <div class="chips">${terms}</div>
       </div>
       <div>
-        <div class="kicker">Grounding</div>
-        <strong>${escapeHtml(data.seed_source)}</strong>
-        <p>${(data.seeds || []).length} validated seeds used for ESM ranking</p>
+        <div class="kicker">AI-selected zebrafish proteins</div>
+        <strong>Gemini + biological APIs</strong>
+        <p>${(data.seeds || []).length} proteins used as starting points for the ESM search</p>
       </div>
     </div>
     <div class="seed-list">${seeds}</div>
-    ${data.ai_explanation ? `<div class="ai-explanation"><div class="kicker">AI interpretation of ranked results</div><p>${escapeHtml(data.ai_explanation)}</p></div>` : ''}
-    ${data.retrieval_warning ? `<p class="warning">UniProt warning: ${escapeHtml(data.retrieval_warning)}. Local annotation fallback was used where needed.</p>` : ''}
+    ${data.ai_explanation ? `<div class="ai-explanation"><div class="kicker">AI interpretation</div><p>${escapeHtml(data.ai_explanation)}</p></div>` : ''}
+    ${data.retrieval_warning ? `<p class="warning">UniProt lookup warning: ${escapeHtml(data.retrieval_warning)}</p>` : ''}
     <p class="privacy-note">${escapeHtml(data.privacy || '')}</p>
   `;
   discoveryPanel.classList.remove('hidden');
@@ -151,8 +151,8 @@ async function runSearch() {
   matchPanel.classList.add('hidden');
   discoveryPanel.classList.add('hidden');
   const status = currentMode === 'protein'
-    ? 'Searching the local ESM database...'
-    : 'Interpreting the question, grounding seeds, and ranking the local ESM database...';
+    ? 'Searching the local ESM embedding database...'
+    : 'Using Gemini and biological APIs to identify zebrafish proteins, then searching the ESM embedding space...';
   showMessage(status);
   searchButton.disabled = true;
 
@@ -163,7 +163,7 @@ async function runSearch() {
     if (!data.ok) {
       if (data.plan && currentMode === 'discovery') {
         discoveryPanel.innerHTML = `
-          <div class="kicker">Retrieval plan</div>
+          <div class="kicker">AI search details</div>
           <strong>${escapeHtml(data.plan.normalized_question || q)}</strong>
           <p>${escapeHtml(data.plan.rationale || '')}</p>
         `;
@@ -226,9 +226,9 @@ async function loadStatus() {
     const res = await fetch('/api/status');
     const data = await res.json();
     if (data.ai_available) {
-      aiStatus.innerHTML = `<span class="mini-dot good"></span> AI interpreter enabled · ${escapeHtml(data.ai_model)}`;
+      aiStatus.innerHTML = `<span class="mini-dot good"></span> AI-assisted search enabled · ${escapeHtml(data.ai_model)}`;
     } else {
-      aiStatus.innerHTML = '<span class="mini-dot"></span> AI key not configured · deterministic fallback available';
+      aiStatus.innerHTML = '<span class="mini-dot"></span> AI not configured · ESM protein similarity still available';
     }
   } catch (_) {
     aiStatus.textContent = 'AI status unavailable';

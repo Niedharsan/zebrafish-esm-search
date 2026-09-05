@@ -1,12 +1,14 @@
 # Zebrafish ESM Search
 
-AI-assisted zebrafish protein discovery combining ESM protein embeddings, a local zebrafish protein database, Gemini biological-language interpretation, public bioinformatics APIs, and deterministic protein identity validation.
+AI-assisted zebrafish protein discovery using Gemini, biological APIs, and whole-proteome ESM protein embeddings.
 
-The dashboard supports both direct protein lookup and natural-language biological discovery. Its final search space is always *Danio rerio*.
+The zebrafish reference proteome used in this project was embedded with EvolutionaryScale's ESMC 6B protein language model through the Forge API. Those embeddings create a local vector search space where proteins can be compared by learned sequence representation, enabling semantic protein similarity search across the zebrafish proteome.
+
+The current local dataset indexes 22,523 zebrafish proteins. Gemini adds a natural-language biological search layer, while UniProt and Ensembl REST APIs resolve biological findings to real *Danio rerio* protein identities before the ESM search is run. Raw embedding vectors remain local and are never sent to Gemini.
 
 ## Search modes
 
-### Protein lookup
+### Protein similarity
 
 Enter a gene symbol, UniProt accession, or protein identifier such as:
 
@@ -17,9 +19,9 @@ mpx
 Q7SXE0
 ```
 
-The application resolves the protein deterministically against the local database and returns the closest zebrafish proteins by ESM embedding similarity. This mode does not require AI.
+The application resolves the protein against the local database and returns the most similar zebrafish proteins in ESM embedding space. This mode does not require Gemini.
 
-### Biological discovery
+### AI biological search
 
 Ask a biological question in natural language, for example:
 
@@ -34,38 +36,46 @@ Which proteins are involved in pigmentation?
 Which proteins bind actin?
 ```
 
-The AI layer interprets the question, uses public biological resources to identify relevant zebrafish proteins, validates their identities against the local protein database, and expands the validated set through ESM similarity.
+Gemini interprets the biological question using Google Search grounding. UniProt and Ensembl APIs are then used to resolve relevant findings to zebrafish proteins, which are validated against the local database before whole-proteome ESM similarity search.
 
 ```text
 Biological question
         ↓
-AI-assisted zebrafish discovery
+Gemini + Google Search
         ↓
-public biological databases/APIs
+UniProt + Ensembl APIs
         ↓
 validated zebrafish proteins
         ↓
-ESM embedding similarity
+whole-proteome ESM embedding search
         ↓
-ranked related proteins
+related zebrafish proteins
 ```
+
+## ESM embedding provenance
+
+The embedding dataset was generated through EvolutionaryScale's Forge API using the ESMC 6B model. Protein sequences were sent to the model to obtain ESM embeddings, which were stored locally and later assembled into the SQLite/NumPy search database used by this application.
+
+The Forge API is used for embedding generation, not for every dashboard query. Once the embedding database exists, protein similarity search runs locally.
 
 ## Integrations
 
-- Gemini API with Google Search grounding
-- UniProt REST API
-- Ensembl REST API
-- ESM protein embeddings
-- SQLite and NumPy
+- EvolutionaryScale Forge API / ESMC 6B — protein embedding generation
+- Gemini API with Google Search grounding — natural-language biological search
+- UniProt REST API — zebrafish protein and identifier resolution
+- Ensembl REST API — orthology and identifier support
+- ESM protein embeddings — whole-proteome similarity search
+- SQLite and NumPy — local vector storage and ranking
 
-## Privacy and species boundaries
+## Data and scope
 
-- Final seed proteins and similarity results are restricted to *Danio rerio*.
-- Every AI-assisted candidate must resolve to an exact protein in the local zebrafish database before ESM search.
+- The final search space is restricted to *Danio rerio*.
+- The current project database contains 22,523 zebrafish proteins with 2,560-dimensional ESM vectors.
+- AI-assisted candidates must resolve to a real protein in the local zebrafish database before they are used for ESM search.
 - The SQLite database and embedding files remain local and are not committed to the repository.
 - Gemini never receives raw embedding vectors or database credentials.
-- The API key remains server-side.
-- Exact protein lookup remains available without Gemini.
+- API keys remain server-side.
+- Direct protein similarity search remains available without Gemini.
 
 ## Installation
 
@@ -88,29 +98,34 @@ GEMINI_MODEL=gemini-2.5-flash-lite
 
 ## Run locally
 
+Direct Python launch:
+
 ```bash
 python app.py --db data/zebrafish_esm.db
 ```
 
-On macOS, you can also run:
+Then open `http://127.0.0.1:5000`.
+
+On macOS, you can instead run:
 
 ```bash
 ./start_dashboard.command
 ```
 
-Then open `http://127.0.0.1:5000`.
+The macOS launcher uses `http://127.0.0.1:8000` and falls back to port `3000` if needed.
 
-## Build the private database
+## Build the local search database
+
+`build_database.py` assembles saved ESM embedding chunks and metadata into the local SQLite database:
 
 ```bash
 python build_database.py \
-  --embeddings /path/to/embeddings.npy \
+  --pt-dir /path/to/embedding_chunks \
   --metadata /path/to/metadata.csv \
-  --id-column protein_id \
-  --name-column gene_name \
-  --description-column description \
   --out-db data/zebrafish_esm.db
 ```
+
+The original ESM embedding generation was performed separately through the EvolutionaryScale Forge API.
 
 ## Tests
 
