@@ -1,12 +1,12 @@
 # Mac Launcher
 
-This folder includes a local macOS launcher for the Zebrafish ESM Dashboard. It uses the existing virtual environment in `.venv/` and the existing SQLite database at `data/zebrafish_esm.db`.
+This repository includes a local macOS launcher for the Zebrafish ESM Dashboard. The launcher resolves the repository folder dynamically from its own location, so it does not depend on a developer-specific absolute path.
 
-It does not rebuild the database and does not move or modify the original ESM embedding chunks.
+It uses the virtual environment in `.venv/` and the SQLite database at `data/zebrafish_esm.db` inside the cloned repository. It does not rebuild the database and does not move or modify the original ESM embedding chunks.
 
 ## Run
 
-Double-click either:
+From a cloned or downloaded copy of the repository, double-click either:
 
 ```text
 start_dashboard.command
@@ -20,7 +20,7 @@ Zebrafish ESM Dashboard.app
 
 The launcher will:
 
-- open the project folder
+- resolve the repository folder automatically
 - activate `.venv/`
 - run `python app.py --db data/zebrafish_esm.db --host 127.0.0.1 --port 8000`
 - open `http://127.0.0.1:8000` in your browser
@@ -44,7 +44,7 @@ If macOS says the command or app cannot be opened:
 
 You can also Control-click the launcher, choose **Open**, then confirm.
 
-If macOS says the command file is not executable, run this once from Terminal:
+If macOS says the command file is not executable, run this once from Terminal in the repository folder:
 
 ```bash
 chmod +x start_dashboard.command
