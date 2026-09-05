@@ -1,91 +1,73 @@
 # Zebrafish ESM Search
 
-A local zebrafish protein-discovery dashboard that combines a private ESM embedding database with a small AI research layer.
+AI-assisted zebrafish protein discovery combining ESM protein embeddings, a local zebrafish protein database, Gemini biological-language interpretation, public bioinformatics APIs, and deterministic protein identity validation.
 
-> **Gemini does the biological reasoning. Deterministic code only controls protein identity, zebrafish validation, orthology fallback, and ESM similarity.**
+The dashboard supports both direct protein lookup and natural-language biological discovery. Its final search space is always *Danio rerio*.
 
-The real embedding database is not committed to this repository and raw embeddings are never sent to Gemini or the browser.
+## Search modes
 
-## Two modes
+### Protein lookup
 
-### 1. Protein lookup
-
-Examples:
+Enter a gene symbol, UniProt accession, or protein identifier such as:
 
 ```text
-gata1a
 mpeg1.1
+gata1a
 mpx
-ENSDARP...
+Q7SXE0
 ```
 
-Flow:
+The application resolves the protein deterministically against the local database and returns the closest zebrafish proteins by ESM embedding similarity. This mode does not require AI.
+
+### Biological discovery
+
+Ask a biological question in natural language, for example:
 
 ```text
-local identity resolution
-→ private ESM database
-→ cosine similarity
-→ ranked zebrafish proteins
+Which proteins are associated with zebrafish macrophages?
+Which zebrafish proteins are involved in Wnt signaling?
+Find proteins involved in autophagy.
+Which proteins are expressed in the zebrafish heart?
+Find proteins associated with fin regeneration.
+Which proteins are related to cilia?
+Which proteins are involved in pigmentation?
+Which proteins bind actin?
 ```
 
-This path is deterministic and does not require AI.
-
-### 2. Biological question
-
-Examples:
+The AI layer interprets the question, uses public biological resources to identify relevant zebrafish proteins, validates their identities against the local protein database, and expands the validated set through ESM similarity.
 
 ```text
-macrophage proteins
-Wnt signaling proteins
-proteins involved in autophagy
-proteins expressed in the heart
+Biological question
+        ↓
+AI-assisted zebrafish discovery
+        ↓
+public biological databases/APIs
+        ↓
+validated zebrafish proteins
+        ↓
+ESM embedding similarity
+        ↓
+ranked related proteins
 ```
 
-Flow:
+## Integrations
 
-```text
-user question
-→ simple Danio rerio UniProt retrieval
-→ Gemini + Google Search researches the biology
-→ Gemini ranks the strongest zebrafish candidates
-→ deterministic local zebrafish validation
-→ optional human/mouse → zebrafish Ensembl orthology fallback
-→ private ESM similarity expansion
-```
-
-There is deliberately **no hand-built question-type classifier, biological evidence taxonomy, or weighted relevance engine**.
-
-UniProt search order is only retrieval context. Gemini is explicitly told that a hit may rank highly just because the query word occurs in the protein name, and that it must use independent zebrafish evidence to decide biological relevance.
-
-For example, a UniProt search for `macrophage` may surface `mpeg1.1` because its protein name contains “Macrophage-expressed gene 1”. That lexical match is useful for retrieval, but Gemini still has to check the zebrafish biology before ranking it.
-
-## Species policy
-
-- Final ESM seeds are always **Danio rerio** proteins.
-- Gemini searches zebrafish evidence first.
-- Human/mouse evidence is only a fallback when zebrafish evidence is sparse.
-- Mammalian genes cannot enter the ESM search directly; they must first map to zebrafish orthologues through Ensembl.
-- Every final seed must resolve into the local zebrafish protein database.
-
-## Privacy
-
-- `.db`, `.sqlite`, `.npy`, `.npz`, and `.pt` files stay local/private.
-- `GEMINI_API_KEY` stays server-side.
-- Gemini receives the biological question and compact public UniProt metadata, not embedding vectors or database credentials.
-- The browser receives protein metadata and similarity results, not raw embeddings.
-
-## Stack
-
-- Python standard-library HTTP server
-- SQLite
-- NumPy
-- Gemini REST API + Google Search grounding
+- Gemini API with Google Search grounding
 - UniProt REST API
 - Ensembl REST API
-- vanilla HTML/CSS/JavaScript
-- GitHub Actions + `unittest`
+- ESM protein embeddings
+- SQLite and NumPy
 
-## Install
+## Privacy and species boundaries
+
+- Final seed proteins and similarity results are restricted to *Danio rerio*.
+- Every AI-assisted candidate must resolve to an exact protein in the local zebrafish database before ESM search.
+- The SQLite database and embedding files remain local and are not committed to the repository.
+- Gemini never receives raw embedding vectors or database credentials.
+- The API key remains server-side.
+- Exact protein lookup remains available without Gemini.
+
+## Installation
 
 ```bash
 python3 -m venv .venv
@@ -93,20 +75,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Configure AI
+Copy the example configuration and add a Gemini API key:
 
 ```bash
 cp config.example .env
 ```
 
-Set:
-
 ```text
 GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
-
-Exact protein lookup works without Gemini.
 
 ## Run locally
 
@@ -114,15 +92,15 @@ Exact protein lookup works without Gemini.
 python app.py --db data/zebrafish_esm.db
 ```
 
-or on macOS:
+On macOS, you can also run:
 
 ```bash
 ./start_dashboard.command
 ```
 
-## Build the private database
+Then open `http://127.0.0.1:5000`.
 
-Example:
+## Build the private database
 
 ```bash
 python build_database.py \
@@ -134,30 +112,19 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-## Live integration test
+## Tests
 
-This uses your local `.env` and private database and makes real Gemini + Google Search + UniProt calls:
+Run the local regression suite:
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile app.py build_database.py scripts/live_integration_test.py
+```
+
+An optional live integration test uses the local API key and private database to exercise Gemini, Google Search, UniProt, local validation, and ESM:
 
 ```bash
 .venv/bin/python scripts/live_integration_test.py
 ```
 
-The default checks include:
-
-```text
-macrophage proteins
-Wnt signaling proteins
-```
-
-For the macrophage case, the script explicitly checks that `mpeg1.1` reaches the final validated seed set.
-
-The live test is intentionally not run in public CI because it needs your private local API key and database.
-
-## Normal tests
-
-```bash
-python -m unittest discover -s tests -v
-python -m py_compile app.py build_database.py
-```
-
-The regression suite checks deterministic protein lookup, Gemini grounding payloads, simple zebrafish UniProt retrieval, AI-first ranking, UniProt synonym/accession resolution, mammalian orthology fallback, and ESM ranking.
+The live test covers macrophage discovery and a non-macrophage Wnt signaling query. It is intentionally excluded from public CI because it requires local credentials and data.
