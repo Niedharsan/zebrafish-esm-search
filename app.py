@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Zebrafish ESM dashboard with deterministic and AI-assisted discovery modes.
+"""Zebrafish ESM dashboard with deterministic and evidence-grounded discovery modes.
 
 Exact protein lookup and ESM similarity remain deterministic. Biological-query
-mode is zebrafish-first: Gemini uses Google Search for evidence gathering, then
-a separate structured-output call converts that research into candidate genes.
-Every final ESM seed must resolve to a protein in the local zebrafish database.
-When zebrafish evidence is sparse, human/mouse genes may be used only as
-reference evidence and are deterministically mapped to zebrafish orthologues
-with Ensembl before they can become seeds.
+mode is zebrafish-first: Gemini plans retrieval, structured UniProt and Ensembl
+evidence is collected, Google Search grounding adds independent biological
+context, and a final evidence-ranking call selects candidates. Every final ESM
+seed must resolve deterministically to a protein in the local zebrafish database.
+Human/mouse genes may be used only as reference evidence and are mapped to
+zebrafish orthologues with Ensembl before they can become seeds.
 """
 
 from __future__ import annotations
@@ -40,9 +40,28 @@ ENSEMBL_REST_URL = "https://rest.ensembl.org"
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 HTTP_TIMEOUT_SECONDS = 12
-UNIPROT_RESULTS_PER_TERM = 20
+UNIPROT_RESULTS_PER_TERM = 10
+MAX_UNIPROT_EVIDENCE_RECORDS = 30
 MAX_DISCOVERY_SEEDS = 12
 MIN_ZEBRAFISH_SEEDS_BEFORE_ORTHOLOGY = 8
+
+QUESTION_TYPES = {
+    "cell_type",
+    "tissue",
+    "biological_process",
+    "pathway",
+    "phenotype",
+    "molecular_function",
+    "protein_family",
+    "other",
+}
+
+DEFAULT_EVIDENCE_PRIORITIES = [
+    "direct zebrafish experimental or curated biological evidence",
+    "relevant zebrafish functional/GO/pathway/expression evidence",
+    "independent zebrafish literature or ZFIN evidence",
+    "lexical protein-name matches only as weak supporting evidence",
+]
 
 PROTEINS: List[Dict[str, Any]] = []
 ID_TO_INDEX: Dict[str, int] = {}
@@ -147,6 +166,20 @@ def resolve_exact_identifier(value: str) -> Optional[int]:
     return None
 
 
+def resolve_uniprot_accession(value: str) -> Optional[int]:
+    accession = value.strip().lower()
+    if not accession:
+        return None
+    exact = resolve_exact_identifier(accession)
+    if exact is not None:
+        return exact
+    for i, protein in enumerate(PROTEINS):
+        parts = [part.strip().lower() for part in str(protein.get("protein_id") or "").split("|")]
+        if accession in parts:
+            return i
+    return None
+
+
 def resolve_query(query: str) -> Optional[Tuple[int, str, float]]:
     q = query.strip().lower()
     if not q:
@@ -234,7 +267,7 @@ def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
 def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Optional[bytes] = None) -> Any:
     request_headers = {
         "Accept": "application/json",
-        "User-Agent": "zebrafish-esm-search/2.2",
+        "User-Agent": "zebrafish-esm-search/2.3",
         **(headers or {}),
     }
     req = Request(url, data=data, headers=request_headers, method="POST" if data is not None else "GET")
@@ -308,128 +341,55 @@ def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
     return text
 
 
-def _clean_candidate_list(values: Any, *, allowed_species: Optional[set[str]] = None, limit: int = 8) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
+def _clean_candidate_list(values: Any, *, allowed_species: Optional[set[str]] = None, limit: int = 12) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str]] = set()
     for raw in values or []:
         if not isinstance(raw, dict):
             continue
         gene = str(raw.get("gene") or "").strip()
         species = str(raw.get("species") or "zebrafish").strip().lower()
-        reason = str(raw.get("reason") or "").strip()[:400]
+        reason = str(raw.get("reason") or "").strip()[:600]
+        accession = str(raw.get("uniprot_accession") or "").strip()[:40]
+        evidence_types = []
+        for item in raw.get("evidence_types") or []:
+            value = str(item).strip()
+            if value and value not in evidence_types:
+                evidence_types.append(value[:80])
         if allowed_species is not None and species not in allowed_species:
             continue
         key = (species, gene.lower())
         if not gene or key in seen:
             continue
         seen.add(key)
-        out.append({"gene": gene[:80], "species": species, "reason": reason})
+        out.append(
+            {
+                "gene": gene[:80],
+                "species": species,
+                "reason": reason,
+                "uniprot_accession": accession,
+                "evidence_types": evidence_types[:8],
+            }
+        )
         if len(out) >= limit:
             break
     return out
 
 
-def interpret_biological_query(question: str) -> Dict[str, Any]:
-    """Research zebrafish biology first, then structure the grounded evidence."""
-    question = question.strip()
-    fallback = {
-        "normalized_question": question,
-        "retrieval_terms": [question],
-        "zebrafish_candidates": [],
-        "reference_candidates": [],
-        "rationale": "Direct zebrafish biological keyword retrieval (AI interpreter unavailable).",
-        "ai_used": False,
-        "search_grounded": False,
-    }
-    if not ai_available():
-        return fallback
-
-    research_prompt = f"""Research this biological question specifically for DANIO RERIO (zebrafish): {question!r}
-
-Use Google Search before answering.
-
-For biological questions about a cell type, tissue, process, phenotype, pathway, or function, identify and rank the strongest zebrafish genes/proteins directly associated with the user's target concept.
-
-Prioritize, in this order:
-1. established zebrafish markers, defining genes, or highly specific genes for the target concept;
-2. genes shown to be highly enriched, highly expressed, or strongly associated with the target concept in zebrafish;
-3. genes with strong direct zebrafish functional evidence;
-4. broader related genes only after the more specific evidence above.
-
-Prefer genes that are directly characteristic of the target concept over genes that are only indirectly related through a broad process.
-
-If strong zebrafish evidence is sparse, use well-supported human or mouse evidence to identify plausible conserved genes, but report these separately for deterministic zebrafish orthology mapping.
-
-Produce a ranked section called "TOP ZEBRAFISH CANDIDATES" containing up to 10 genes, strongest evidence first, with a short reason for each.
-
-Zebrafish is always the final target species. Search zebrafish / Danio rerio evidence first, including relevant expression resources, genetic studies, pathway annotations, ZFIN, UniProt, Ensembl, single-cell resources, and zebrafish papers.
-
-Return a concise plain-text research note. Do NOT return JSON. Include gene symbols and species labels where relevant.
-"""
-
-    try:
-        grounded_research = _gemini_text(research_prompt, use_google_search=True)
-
-        structure_prompt = f"""Convert the grounded research note below into a zebrafish protein-discovery plan.
-
-The final target species is Danio rerio.
-
-Original user question: {question!r}
-
-Grounded research note:
----
-{grounded_research[:12000]}
----
-
-IMPORTANT:
-- zebrafish_candidates must contain the strongest zebrafish genes from the "TOP ZEBRAFISH CANDIDATES" section.
-- Preserve their evidence-based ranking.
-- Prefer genes that are directly characteristic of the user's target concept over genes that are only broadly or indirectly related.
-- Keep human/mouse candidates separate from zebrafish_candidates.
-
-Return only JSON with this exact shape:
-{{
-  "normalized_question": "zebrafish-specific normalized question",
-  "retrieval_terms": ["3 to 5 concise zebrafish biological search concepts"],
-  "zebrafish_candidates": [
-    {{"gene": "exact zebrafish gene symbol", "species": "zebrafish", "reason": "direct evidence/relevance"}}
-  ],
-  "reference_candidates": [
-    {{"gene": "human or mouse gene symbol", "species": "human or mouse", "reason": "why this mammalian evidence is useful because zebrafish evidence is sparse"}}
-  ],
-  "rationale": "one or two sentences"
-}}
-"""
-        data = _parse_json_object(_gemini_text(structure_prompt))
-
-        terms: List[str] = []
-        for value in data.get("retrieval_terms") or []:
-            term = str(value).strip()
-            if term and term.lower() not in {x.lower() for x in terms}:
-                terms.append(term[:120])
-        if not terms:
-            terms = [question]
-
-        return {
-            "normalized_question": str(data.get("normalized_question") or question).strip()[:240],
-            "retrieval_terms": terms[:5],
-            "zebrafish_candidates": _clean_candidate_list(
-                data.get("zebrafish_candidates"),
-                allowed_species={"zebrafish", "danio rerio"},
-                limit=8,
-            ),
-            "reference_candidates": _clean_candidate_list(
-                data.get("reference_candidates"),
-                allowed_species={"human", "mouse"},
-                limit=6,
-            ),
-            "rationale": str(data.get("rationale") or "Zebrafish-first grounded search plan.").strip()[:600],
-            "ai_used": True,
-            "search_grounded": True,
-        }
-    except Exception as exc:
-        fallback["rationale"] = f"AI search unavailable; used zebrafish-only direct retrieval instead. ({exc})"
-        return fallback
+def _all_strings(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        out: List[str] = []
+        for item in value.values():
+            out.extend(_all_strings(item))
+        return out
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_all_strings(item))
+        return out
+    return []
 
 
 def _primary_gene_name(uniprot_record: Dict[str, Any]) -> str:
@@ -438,6 +398,16 @@ def _primary_gene_name(uniprot_record: Dict[str, Any]) -> str:
         if value:
             return value
     return ""
+
+
+def _gene_synonyms(uniprot_record: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for gene in uniprot_record.get("genes") or []:
+        for synonym in (gene or {}).get("synonyms") or []:
+            value = str((synonym or {}).get("value") or "").strip()
+            if value and value not in out:
+                out.append(value)
+    return out
 
 
 def _protein_description(uniprot_record: Dict[str, Any]) -> str:
@@ -456,79 +426,595 @@ def _protein_description(uniprot_record: Dict[str, Any]) -> str:
     return ""
 
 
-def validate_ai_zebrafish_candidates(candidates: Iterable[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """AI may nominate genes, but only exact local zebrafish identities become seeds."""
+def _comment_text(uniprot_record: Dict[str, Any], comment_types: set[str]) -> str:
+    pieces: List[str] = []
+    for comment in uniprot_record.get("comments") or []:
+        if str((comment or {}).get("commentType") or "").upper() not in comment_types:
+            continue
+        pieces.extend(_all_strings(comment))
+    return " ".join(dict.fromkeys(piece.strip() for piece in pieces if piece.strip()))
+
+
+def _go_text(uniprot_record: Dict[str, Any], aspect: str) -> str:
+    prefix = {"biological_process": "P:", "molecular_function": "F:", "cellular_component": "C:"}[aspect]
+    terms: List[str] = []
+    for xref in uniprot_record.get("uniProtKBCrossReferences") or []:
+        if str((xref or {}).get("database") or "") != "GO":
+            continue
+        for prop in (xref or {}).get("properties") or []:
+            value = str((prop or {}).get("value") or "").strip()
+            if value.startswith(prefix):
+                terms.append(value)
+    return " | ".join(dict.fromkeys(terms))
+
+
+def _term_tokens(term: str) -> List[str]:
+    stop = {
+        "protein", "proteins", "gene", "genes", "zebrafish", "danio", "rerio",
+        "marker", "markers", "related", "associated", "involved", "role", "roles",
+    }
+    tokens = [token for token in re.findall(r"[a-z0-9]+", term.lower()) if len(token) >= 3 and token not in stop]
+    return list(dict.fromkeys(tokens))
+
+
+def _text_matches(tokens: Iterable[str], text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in tokens)
+
+
+def uniprot_record_to_evidence(record: Dict[str, Any], term: str, search_rank: int) -> Dict[str, Any]:
+    accession = str(record.get("primaryAccession") or "").strip()
+    gene = _primary_gene_name(record)
+    synonyms = _gene_synonyms(record)
+    protein_name = _protein_description(record)
+    function_text = _comment_text(record, {"FUNCTION"})
+    pathway_text = _comment_text(record, {"PATHWAY"})
+    expression_text = _comment_text(record, {"TISSUE SPECIFICITY", "DEVELOPMENTAL STAGE", "INDUCTION"})
+    phenotype_text = _comment_text(record, {"DISRUPTION PHENOTYPE"})
+    go_bp = _go_text(record, "biological_process")
+    go_mf = _go_text(record, "molecular_function")
+    go_cc = _go_text(record, "cellular_component")
+    tokens = _term_tokens(term)
+
+    evidence_types: List[str] = []
+    matched_fields: List[str] = []
+    name_text = " ".join([gene, *synonyms, protein_name])
+    checks = [
+        ("name_match", "name", name_text),
+        ("function_annotation", "function", function_text),
+        ("pathway_annotation", "pathway", pathway_text),
+        ("expression_annotation", "expression", expression_text),
+        ("phenotype_annotation", "phenotype", phenotype_text),
+        ("go_biological_process", "go_biological_process", go_bp),
+        ("go_molecular_function", "go_molecular_function", go_mf),
+        ("go_cellular_component", "go_cellular_component", go_cc),
+    ]
+    for evidence_type, field, text in checks:
+        if tokens and text and _text_matches(tokens, text):
+            evidence_types.append(evidence_type)
+            matched_fields.append(field)
+    if not evidence_types:
+        evidence_types.append("uniprot_text_search_hit")
+
+    return {
+        "source": "UniProtKB",
+        "search_term": term,
+        "search_rank": int(search_rank),
+        "gene": gene,
+        "gene_synonyms": synonyms[:8],
+        "uniprot_accession": accession,
+        "protein_name": protein_name,
+        "evidence_types": evidence_types,
+        "matched_fields": matched_fields,
+        "annotations": {
+            "function": function_text[:700],
+            "pathway": pathway_text[:700],
+            "expression": expression_text[:700],
+            "phenotype": phenotype_text[:700],
+            "go_biological_process": go_bp[:700],
+            "go_molecular_function": go_mf[:700],
+            "go_cellular_component": go_cc[:700],
+        },
+        "retrieval_note": "UniProt search rank is retrieval order, not a biological relevance score.",
+    }
+
+
+def fetch_uniprot_evidence(
+    terms: Iterable[str],
+    *,
+    per_term: int = UNIPROT_RESULTS_PER_TERM,
+    max_records: int = MAX_UNIPROT_EVIDENCE_RECORDS,
+) -> List[Dict[str, Any]]:
+    fields = ",".join(
+        [
+            "accession", "gene_primary", "gene_synonym", "protein_name",
+            "cc_function", "cc_pathway", "cc_tissue_specificity",
+            "cc_developmental_stage", "cc_disruption_phenotype",
+            "go_p", "go_f", "go_c",
+        ]
+    )
+    by_accession: Dict[str, Dict[str, Any]] = {}
+    for term in terms:
+        term = str(term).strip()
+        if not term:
+            continue
+        query = f"(organism_id:{DANIO_RERIO_TAXON_ID}) AND ({term})"
+        params = urlencode(
+            {
+                "query": query,
+                "format": "json",
+                "fields": fields,
+                "size": str(per_term),
+            }
+        )
+        payload = _http_json(f"{UNIPROT_SEARCH_URL}?{params}")
+        for rank, record in enumerate(payload.get("results") or [], start=1):
+            evidence = uniprot_record_to_evidence(record, term, rank)
+            key = evidence.get("uniprot_accession") or f"{evidence.get('gene')}::{term}::{rank}"
+            if key not in by_accession:
+                by_accession[key] = evidence
+            else:
+                current = by_accession[key]
+                current["search_rank"] = min(int(current["search_rank"]), rank)
+                current_terms = current.setdefault("search_terms", [current.get("search_term")])
+                if term not in current_terms:
+                    current_terms.append(term)
+                for evidence_type in evidence.get("evidence_types") or []:
+                    if evidence_type not in current["evidence_types"]:
+                        current["evidence_types"].append(evidence_type)
+                for field in evidence.get("matched_fields") or []:
+                    if field not in current["matched_fields"]:
+                        current["matched_fields"].append(field)
+            if len(by_accession) >= max_records:
+                break
+        if len(by_accession) >= max_records:
+            break
+    return list(by_accession.values())[:max_records]
+
+
+def fetch_ensembl_evidence(symbols: Iterable[str]) -> List[Dict[str, Any]]:
+    requested = []
+    for symbol in symbols:
+        value = str(symbol).strip()
+        if value and value.lower() not in {x.lower() for x in requested}:
+            requested.append(value)
+        if len(requested) >= 40:
+            break
+    if not requested:
+        return []
+
+    payload = _http_json(
+        f"{ENSEMBL_REST_URL}/lookup/symbol/danio_rerio",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps({"symbols": requested}).encode("utf-8"),
+    )
+    out: List[Dict[str, Any]] = []
+    resolved_requested: set[str] = set()
+    if isinstance(payload, dict):
+        for requested_symbol, record in payload.items():
+            if not isinstance(record, dict):
+                continue
+            canonical = str(record.get("display_name") or requested_symbol).strip()
+            out.append(
+                {
+                    "source": "Ensembl",
+                    "requested_symbol": requested_symbol,
+                    "canonical_symbol": canonical,
+                    "ensembl_id": str(record.get("id") or "").strip(),
+                    "description": str(record.get("description") or "").strip()[:700],
+                    "biotype": str(record.get("biotype") or "").strip(),
+                    "evidence_types": ["identifier_resolution"],
+                }
+            )
+            resolved_requested.add(requested_symbol.lower())
+
+    for symbol in requested:
+        if symbol.lower() in resolved_requested:
+            continue
+        try:
+            params = urlencode({"object_type": "gene"})
+            xrefs = _http_json(
+                f"{ENSEMBL_REST_URL}/xrefs/symbol/danio_rerio/{quote(symbol)}?{params}",
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception:
+            continue
+        for xref in (xrefs or [])[:3]:
+            ensembl_id = str((xref or {}).get("id") or "").strip()
+            if not ensembl_id:
+                continue
+            try:
+                lookup = _http_json(
+                    f"{ENSEMBL_REST_URL}/lookup/id/{quote(ensembl_id)}?content-type=application/json",
+                    headers={"Content-Type": "application/json"},
+                )
+            except Exception:
+                lookup = {}
+            canonical = str((lookup or {}).get("display_name") or (xref or {}).get("display_id") or symbol).strip()
+            out.append(
+                {
+                    "source": "Ensembl",
+                    "requested_symbol": symbol,
+                    "canonical_symbol": canonical,
+                    "ensembl_id": ensembl_id,
+                    "description": str((lookup or {}).get("description") or "").strip()[:700],
+                    "biotype": str((lookup or {}).get("biotype") or "").strip(),
+                    "evidence_types": ["identifier_resolution", "symbol_or_synonym_resolution"],
+                }
+            )
+            break
+    return out
+
+
+def _retrieval_plan(question: str) -> Dict[str, Any]:
+    fallback = {
+        "normalized_question": question,
+        "question_type": "other",
+        "retrieval_terms": [question],
+        "evidence_priorities": DEFAULT_EVIDENCE_PRIORITIES,
+    }
+    prompt = f"""Classify this biological request for a DANIO RERIO evidence-retrieval system.
+Question: {question!r}
+
+Do not answer the biological question and do not nominate genes. Return only JSON:
+{{
+  "normalized_question": "zebrafish-specific restatement",
+  "question_type": "one of cell_type, tissue, biological_process, pathway, phenotype, molecular_function, protein_family, other",
+  "retrieval_terms": ["2 to 5 concise concepts suitable for zebrafish UniProt/database search"],
+  "evidence_priorities": ["3 to 5 evidence types that should matter most for this question type"]
+}}
+
+Use evidence appropriate to the actual question. For example, cell/tissue questions should emphasize marker/expression evidence; pathway/process questions should emphasize curated pathway, GO process and functional evidence; molecular-function questions should emphasize GO molecular function and functional annotation; phenotype questions should emphasize genetic/phenotype evidence. A lexical protein-name match is weak evidence and must never be treated as proof of expression, pathway membership, phenotype, or function.
+"""
+    try:
+        data = _parse_json_object(_gemini_text(prompt))
+    except Exception:
+        return fallback
+
+    question_type = str(data.get("question_type") or "other").strip().lower()
+    if question_type not in QUESTION_TYPES:
+        question_type = "other"
+    terms: List[str] = []
+    for raw in data.get("retrieval_terms") or []:
+        value = str(raw).strip()
+        if value and value.lower() not in {x.lower() for x in terms}:
+            terms.append(value[:120])
+    if not terms:
+        terms = [question]
+    priorities = []
+    for raw in data.get("evidence_priorities") or []:
+        value = str(raw).strip()
+        if value and value not in priorities:
+            priorities.append(value[:180])
+    return {
+        "normalized_question": str(data.get("normalized_question") or question).strip()[:240],
+        "question_type": question_type,
+        "retrieval_terms": terms[:5],
+        "evidence_priorities": priorities[:5] or DEFAULT_EVIDENCE_PRIORITIES,
+    }
+
+
+def _compact_uniprot_evidence(records: List[Dict[str, Any]], limit: int = 24) -> List[Dict[str, Any]]:
+    return [
+        {
+            "gene": record.get("gene"),
+            "uniprot_accession": record.get("uniprot_accession"),
+            "protein_name": record.get("protein_name"),
+            "search_term": record.get("search_term"),
+            "search_rank": record.get("search_rank"),
+            "evidence_types": record.get("evidence_types"),
+            "matched_fields": record.get("matched_fields"),
+            "annotations": record.get("annotations"),
+        }
+        for record in records[:limit]
+    ]
+
+
+def _ground_evidence(
+    question: str,
+    retrieval_plan: Dict[str, Any],
+    uniprot_evidence: List[Dict[str, Any]],
+    ensembl_evidence: List[Dict[str, Any]],
+) -> str:
+    compact_uniprot = _compact_uniprot_evidence(uniprot_evidence, 20)
+    compact_ensembl = ensembl_evidence[:20]
+    prompt = f"""Research this DANIO RERIO biological question using Google Search: {question!r}
+
+Question type: {retrieval_plan.get('question_type')}
+Evidence priorities: {json.dumps(retrieval_plan.get('evidence_priorities'), ensure_ascii=False)}
+
+Structured UniProtKB retrieval results:
+{json.dumps(compact_uniprot, ensure_ascii=False)}
+
+Structured Ensembl identifier evidence:
+{json.dumps(compact_ensembl, ensure_ascii=False)}
+
+Use independent zebrafish evidence appropriate to the question type: ZFIN, zebrafish papers, expression/single-cell resources, curated pathway or GO resources, phenotype/genetic studies, and other relevant primary or authoritative sources.
+
+Important reasoning rule: UniProt search order is not biological ranking. A result can rank highly simply because the query word occurs in its protein name. Treat `name_match` as lexical evidence only. It is NOT evidence that a protein is highly expressed, cell-type specific, a pathway member, functionally important, or phenotype-causing unless independent annotations or evidence support that conclusion.
+
+For pathways/processes/functions, look for direct curated/functional/GO or experimental support. For cell types/tissues, look for marker/expression/enrichment support. For phenotypes, look for genetic/phenotype evidence. You may identify additional zebrafish genes not present in the structured retrieval if independent evidence supports them. If zebrafish evidence is sparse, clearly separate human/mouse reference evidence.
+
+Return a concise plain-text evidence note, not JSON. Include exact zebrafish gene symbols when supported and explain the evidence type.
+"""
+    return _gemini_text(prompt, use_google_search=True)
+
+
+def _rank_evidence(
+    question: str,
+    retrieval_plan: Dict[str, Any],
+    uniprot_evidence: List[Dict[str, Any]],
+    ensembl_evidence: List[Dict[str, Any]],
+    grounded_note: str,
+) -> Dict[str, Any]:
+    prompt = f"""Rank candidate proteins for this DANIO RERIO biological question using the evidence provided.
+Question: {question!r}
+Question type: {retrieval_plan.get('question_type')}
+Evidence priorities: {json.dumps(retrieval_plan.get('evidence_priorities'), ensure_ascii=False)}
+Retrieval terms: {json.dumps(retrieval_plan.get('retrieval_terms'), ensure_ascii=False)}
+
+UniProtKB structured evidence:
+{json.dumps(_compact_uniprot_evidence(uniprot_evidence, 24), ensure_ascii=False)}
+
+Ensembl identifier evidence:
+{json.dumps(ensembl_evidence[:24], ensure_ascii=False)}
+
+Independent grounded evidence note:
+---
+{grounded_note[:12000]}
+---
+
+Reason over evidence types, not database result order. A `name_match` alone is weak lexical evidence. Never convert a name match into an expression, marker, pathway, phenotype, or functional claim. Weight evidence according to the question type and evidence priorities above. Prefer direct zebrafish evidence over indirect association. Human/mouse genes belong only in reference_candidates and will be mapped deterministically to zebrafish orthologues later.
+
+Return only JSON:
+{{
+  "zebrafish_candidates": [
+    {{
+      "gene": "exact zebrafish gene symbol",
+      "species": "zebrafish",
+      "uniprot_accession": "accession if supported by the supplied evidence, otherwise empty string",
+      "evidence_types": ["specific evidence labels such as marker_support, expression_support, go_biological_process, pathway_support, functional_evidence, phenotype_support, literature_support, name_match"],
+      "reason": "brief explanation of why this candidate fits this specific question"
+    }}
+  ],
+  "reference_candidates": [
+    {{"gene": "human or mouse gene", "species": "human or mouse", "evidence_types": ["reference evidence type"], "reason": "why reference evidence is needed"}}
+  ],
+  "rationale": "one or two sentences explaining the ranking logic"
+}}
+
+Return up to 12 zebrafish candidates in strongest-evidence-first order. Fewer is better than filling the list with weak lexical or indirect matches.
+"""
+    return _parse_json_object(_gemini_text(prompt))
+
+
+def interpret_biological_query(question: str) -> Dict[str, Any]:
+    """Retrieve structured evidence first, then let AI reason over evidence types."""
+    question = question.strip()
+    fallback = {
+        "normalized_question": question,
+        "question_type": "other",
+        "retrieval_terms": [question],
+        "evidence_priorities": DEFAULT_EVIDENCE_PRIORITIES,
+        "zebrafish_candidates": [],
+        "reference_candidates": [],
+        "rationale": "Direct zebrafish biological keyword retrieval (AI interpreter unavailable).",
+        "ai_used": False,
+        "search_grounded": False,
+        "evidence_summary": {"sources": [], "uniprot_records": 0, "ensembl_records": 0},
+        "_uniprot_evidence": [],
+        "_ensembl_evidence": [],
+        "_retrieval_errors": [],
+    }
+    if not ai_available():
+        return fallback
+
+    retrieval_plan = _retrieval_plan(question)
+    errors: List[str] = []
+    try:
+        uniprot_evidence = fetch_uniprot_evidence(retrieval_plan["retrieval_terms"])
+    except Exception as exc:
+        uniprot_evidence = []
+        errors.append(f"UniProt: {exc}")
+
+    try:
+        initial_symbols = [record.get("gene") for record in uniprot_evidence if record.get("gene")]
+        ensembl_evidence = fetch_ensembl_evidence(initial_symbols)
+    except Exception as exc:
+        ensembl_evidence = []
+        errors.append(f"Ensembl: {exc}")
+
+    try:
+        grounded_note = _ground_evidence(question, retrieval_plan, uniprot_evidence, ensembl_evidence)
+        ranked = _rank_evidence(question, retrieval_plan, uniprot_evidence, ensembl_evidence, grounded_note)
+    except Exception as exc:
+        fallback.update(retrieval_plan)
+        fallback["rationale"] = f"AI evidence ranking unavailable; structured zebrafish evidence retained for deterministic fallback. ({exc})"
+        fallback["_uniprot_evidence"] = uniprot_evidence
+        fallback["_ensembl_evidence"] = ensembl_evidence
+        fallback["_retrieval_errors"] = errors
+        fallback["evidence_summary"] = {
+            "sources": [source for source, present in (("UniProtKB", bool(uniprot_evidence)), ("Ensembl", bool(ensembl_evidence))) if present],
+            "uniprot_records": len(uniprot_evidence),
+            "ensembl_records": len(ensembl_evidence),
+        }
+        return fallback
+
+    zebrafish_candidates = _clean_candidate_list(
+        ranked.get("zebrafish_candidates"), allowed_species={"zebrafish", "danio rerio"}, limit=MAX_DISCOVERY_SEEDS
+    )
+    reference_candidates = _clean_candidate_list(
+        ranked.get("reference_candidates"), allowed_species={"human", "mouse"}, limit=6
+    )
+
+    try:
+        candidate_symbols = [candidate["gene"] for candidate in zebrafish_candidates]
+        candidate_ensembl = fetch_ensembl_evidence(candidate_symbols)
+        existing_keys = {(item.get("requested_symbol"), item.get("canonical_symbol"), item.get("ensembl_id")) for item in ensembl_evidence}
+        for item in candidate_ensembl:
+            key = (item.get("requested_symbol"), item.get("canonical_symbol"), item.get("ensembl_id"))
+            if key not in existing_keys:
+                ensembl_evidence.append(item)
+                existing_keys.add(key)
+    except Exception as exc:
+        errors.append(f"Ensembl candidate resolution: {exc}")
+
+    sources = ["Gemini Google Search"]
+    if uniprot_evidence:
+        sources.insert(0, "UniProtKB")
+    if ensembl_evidence:
+        sources.insert(1 if uniprot_evidence else 0, "Ensembl")
+
+    return {
+        **retrieval_plan,
+        "zebrafish_candidates": zebrafish_candidates,
+        "reference_candidates": reference_candidates,
+        "rationale": str(ranked.get("rationale") or "Evidence-ranked zebrafish discovery plan.").strip()[:800],
+        "ai_used": True,
+        "search_grounded": True,
+        "evidence_summary": {
+            "sources": sources,
+            "uniprot_records": len(uniprot_evidence),
+            "ensembl_records": len(ensembl_evidence),
+            "ranking_policy": "Evidence-type aware; database search order is not biological rank.",
+        },
+        "_uniprot_evidence": uniprot_evidence,
+        "_ensembl_evidence": ensembl_evidence,
+        "_retrieval_errors": errors,
+    }
+
+
+def _ensembl_canonical_candidates(gene: str, ensembl_evidence: Iterable[Dict[str, Any]]) -> List[str]:
+    key = gene.strip().lower()
+    out: List[str] = []
+    for item in ensembl_evidence:
+        requested = str(item.get("requested_symbol") or "").strip().lower()
+        canonical = str(item.get("canonical_symbol") or "").strip()
+        if requested == key and canonical and canonical.lower() not in {x.lower() for x in out}:
+            out.append(canonical)
+        if canonical.lower() == key and canonical and canonical.lower() not in {x.lower() for x in out}:
+            out.append(canonical)
+    return out
+
+
+def validate_ai_zebrafish_candidates(
+    candidates: Iterable[Dict[str, Any]],
+    uniprot_evidence: Optional[Iterable[Dict[str, Any]]] = None,
+    ensembl_evidence: Optional[Iterable[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """AI ranks evidence; only deterministic local identities become ESM seeds."""
+    uniprot_records = list(uniprot_evidence or [])
+    ensembl_records = list(ensembl_evidence or [])
+    by_gene = {str(r.get("gene") or "").lower(): r for r in uniprot_records if r.get("gene")}
+    by_accession = {str(r.get("uniprot_accession") or "").lower(): r for r in uniprot_records if r.get("uniprot_accession")}
+
     seeds: List[Dict[str, Any]] = []
     seen: set[int] = set()
     for candidate in candidates:
         gene = str(candidate.get("gene") or "").strip()
-        idx = resolve_exact_identifier(gene)
+        accession = str(candidate.get("uniprot_accession") or "").strip()
+        idx: Optional[int] = None
+        resolved_by = ""
+        evidence_record: Optional[Dict[str, Any]] = None
+
+        if gene:
+            idx = resolve_exact_identifier(gene)
+            if idx is not None:
+                resolved_by = "exact local zebrafish gene"
+                evidence_record = by_gene.get(gene.lower())
+
+        if idx is None and accession:
+            idx = resolve_uniprot_accession(accession)
+            if idx is not None:
+                resolved_by = "exact local UniProt accession"
+                evidence_record = by_accession.get(accession.lower())
+
+        if idx is None and gene.lower() in by_gene:
+            record = by_gene[gene.lower()]
+            for label, identifier in (
+                ("UniProt evidence gene", str(record.get("gene") or "")),
+                ("UniProt evidence accession", str(record.get("uniprot_accession") or "")),
+            ):
+                idx = resolve_exact_identifier(identifier) if "gene" in label else resolve_uniprot_accession(identifier)
+                if idx is not None:
+                    resolved_by = label
+                    evidence_record = record
+                    break
+
+        if idx is None and gene:
+            for canonical in _ensembl_canonical_candidates(gene, ensembl_records):
+                idx = resolve_exact_identifier(canonical)
+                if idx is not None:
+                    resolved_by = f"Ensembl symbol resolution: {gene} → {canonical}"
+                    break
+
         if idx is None or idx in seen:
             continue
         seen.add(idx)
+        evidence_types = list(candidate.get("evidence_types") or [])
+        if not evidence_types and evidence_record:
+            evidence_types = list(evidence_record.get("evidence_types") or [])
+        evidence_class = " + ".join(str(item) for item in evidence_types[:5]) or "zebrafish-supported"
         seeds.append(
             {
                 "index": idx,
-                "source": "Gemini Google Search (zebrafish)",
-                "retrieval_term": gene,
-                "resolved_by": "exact local zebrafish gene",
-                "evidence_class": "zebrafish-supported",
+                "source": "Evidence-ranked zebrafish candidate",
+                "retrieval_term": gene or accession,
+                "resolved_by": resolved_by,
+                "uniprot_accession": accession or (evidence_record or {}).get("uniprot_accession"),
+                "evidence_class": evidence_class,
+                "evidence_types": evidence_types,
                 "ai_reason": candidate.get("reason") or "",
             }
         )
     return seeds
 
 
-def fetch_uniprot_seeds(
-    terms: Iterable[str],
-    *,
-    per_term: int = UNIPROT_RESULTS_PER_TERM,
-    max_seeds: int = MAX_DISCOVERY_SEEDS,
-) -> List[Dict[str, Any]]:
-    """Retrieve deeper Danio rerio UniProt results and validate them locally."""
-    seeds: List[Dict[str, Any]] = []
-    seen_local: set[int] = set()
-    for term in terms:
-        query = f"(organism_id:{DANIO_RERIO_TAXON_ID}) AND ({term})"
-        params = urlencode(
+def evidence_fallback_seeds(uniprot_evidence: Iterable[Dict[str, Any]], *, limit: int = 6) -> List[Dict[str, Any]]:
+    weights = {
+        "expression_annotation": 5,
+        "phenotype_annotation": 5,
+        "pathway_annotation": 4,
+        "function_annotation": 4,
+        "go_biological_process": 4,
+        "go_molecular_function": 4,
+        "go_cellular_component": 2,
+        "name_match": 1,
+        "uniprot_text_search_hit": 0,
+    }
+    scored: List[Tuple[int, int, Dict[str, Any]]] = []
+    for record in uniprot_evidence:
+        score = sum(weights.get(str(item), 0) for item in record.get("evidence_types") or [])
+        rank = int(record.get("search_rank") or 999)
+        scored.append((score, -rank, record))
+    scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for score, _, record in scored:
+        gene = str(record.get("gene") or "").strip()
+        accession = str(record.get("uniprot_accession") or "").strip()
+        idx = resolve_exact_identifier(gene)
+        if idx is None:
+            idx = resolve_uniprot_accession(accession)
+        if idx is None or idx in seen:
+            continue
+        seen.add(idx)
+        out.append(
             {
-                "query": query,
-                "format": "json",
-                "fields": "accession,gene_primary,protein_name",
-                "size": str(per_term),
+                "index": idx,
+                "source": "UniProt evidence fallback",
+                "retrieval_term": record.get("search_term"),
+                "uniprot_accession": accession,
+                "resolved_by": "deterministic local evidence fallback",
+                "evidence_class": " + ".join(record.get("evidence_types") or []) or "uniprot retrieval",
+                "evidence_types": record.get("evidence_types") or [],
+                "ai_reason": f"Fallback evidence score {score}; UniProt rank not treated as biological rank.",
             }
         )
-        payload = _http_json(f"{UNIPROT_SEARCH_URL}?{params}")
-        for record in payload.get("results") or []:
-            accession = str(record.get("primaryAccession") or "").strip()
-            gene_name = _primary_gene_name(record)
-            protein_name = _protein_description(record)
-            local_index: Optional[int] = None
-            resolved_by = ""
-            for label, candidate in (("gene name", gene_name), ("UniProt accession", accession)):
-                if candidate:
-                    local_index = resolve_exact_identifier(candidate)
-                    if local_index is not None:
-                        resolved_by = label
-                        break
-            if local_index is None or local_index in seen_local:
-                continue
-            seen_local.add(local_index)
-            seeds.append(
-                {
-                    "index": local_index,
-                    "source": "UniProt zebrafish search",
-                    "retrieval_term": term,
-                    "uniprot_accession": accession,
-                    "uniprot_gene": gene_name,
-                    "uniprot_protein_name": protein_name,
-                    "resolved_by": resolved_by,
-                    "evidence_class": "zebrafish-supported",
-                }
-            )
-            if len(seeds) >= max_seeds:
-                return seeds
-    return seeds
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _ensembl_zebrafish_ortholog_symbols(source_species: str, gene: str) -> List[str]:
@@ -575,7 +1061,7 @@ def _ensembl_zebrafish_ortholog_symbols(source_species: str, gene: str) -> List[
     return symbols
 
 
-def orthology_seeds(reference_candidates: Iterable[Dict[str, str]]) -> List[Dict[str, Any]]:
+def orthology_seeds(reference_candidates: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Map mammalian reference evidence to exact local Danio rerio proteins."""
     seeds: List[Dict[str, Any]] = []
     seen: set[int] = set()
@@ -689,6 +1175,10 @@ def discovery_neighbors(seed_indices: List[int], k: int) -> List[Dict[str, Any]]
     return out
 
 
+def _public_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in plan.items() if not key.startswith("_")}
+
+
 def explain_discovery(question: str, plan: Dict[str, Any], seeds: List[Dict[str, Any]], results: List[Dict[str, Any]]) -> Optional[str]:
     if not ai_available() or not results:
         return None
@@ -702,6 +1192,7 @@ def explain_discovery(question: str, plan: Dict[str, Any], seeds: List[Dict[str,
                 "description": p["description"],
                 "source": seed.get("source"),
                 "evidence_class": seed.get("evidence_class"),
+                "evidence_types": seed.get("evidence_types"),
             }
         )
     compact_results = [
@@ -714,13 +1205,14 @@ def explain_discovery(question: str, plan: Dict[str, Any], seeds: List[Dict[str,
         }
         for r in results[:8]
     ]
+    public_plan = _public_plan(plan)
     prompt = f"""Explain a DANIO RERIO zebrafish ESM protein-similarity result.
 Question: {question}
-Plan: {json.dumps(plan, ensure_ascii=False)}
+Plan: {json.dumps(public_plan, ensure_ascii=False)}
 Validated zebrafish seeds: {json.dumps(compact_seeds, ensure_ascii=False)}
 Top ESM candidates: {json.dumps(compact_results, ensure_ascii=False)}
 Return only JSON: {{"summary": "2-4 concise sentences"}}.
-Keep the interpretation zebrafish-specific. Distinguish direct zebrafish evidence from mammalian evidence transferred through orthology. Do not claim functional proof from ESM similarity alone and do not invent annotations.
+Keep the interpretation zebrafish-specific. Distinguish evidence types. Do not infer expression, pathway membership, phenotype, or function from a lexical name match. Do not claim functional proof from ESM similarity alone and do not invent annotations.
 """
     try:
         data = _parse_json_object(_gemini_text(prompt))
@@ -736,33 +1228,33 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
         return {"ok": False, "mode": "discovery", "message": "Enter a biological question.", "results": []}
 
     plan = interpret_biological_query(question)
-    direct_ai_seeds = validate_ai_zebrafish_candidates(plan.get("zebrafish_candidates") or [])
+    uniprot_evidence = list(plan.get("_uniprot_evidence") or [])
+    ensembl_evidence = list(plan.get("_ensembl_evidence") or [])
+    direct_ai_seeds = validate_ai_zebrafish_candidates(
+        plan.get("zebrafish_candidates") or [], uniprot_evidence, ensembl_evidence
+    )
 
-    retrieval_error: Optional[str] = None
-    try:
-        uniprot_seeds = fetch_uniprot_seeds(plan["retrieval_terms"])
-    except Exception as exc:
-        retrieval_error = str(exc)
-        uniprot_seeds = []
-
-    zebrafish_seeds = _merge_seeds(direct_ai_seeds, uniprot_seeds)
     mapped_reference_seeds: List[Dict[str, Any]] = []
-    if len(zebrafish_seeds) < MIN_ZEBRAFISH_SEEDS_BEFORE_ORTHOLOGY and plan.get("reference_candidates"):
+    if len(direct_ai_seeds) < MIN_ZEBRAFISH_SEEDS_BEFORE_ORTHOLOGY and plan.get("reference_candidates"):
         mapped_reference_seeds = orthology_seeds(plan["reference_candidates"])
 
-    seeds = _merge_seeds(zebrafish_seeds, mapped_reference_seeds)
+    seeds = _merge_seeds(direct_ai_seeds, mapped_reference_seeds)
+    if not seeds and uniprot_evidence:
+        seeds = evidence_fallback_seeds(uniprot_evidence)
     if not seeds:
         seeds = local_annotation_seeds(plan["retrieval_terms"])
 
+    retrieval_errors = list(plan.get("_retrieval_errors") or [])
+    retrieval_warning = "; ".join(retrieval_errors) if retrieval_errors else None
     if not seeds:
         message = "No validated zebrafish seed proteins could be resolved into the local ESM database."
-        if retrieval_error:
-            message += f" UniProt error: {retrieval_error}"
+        if retrieval_warning:
+            message += f" Retrieval error: {retrieval_warning}"
         return {
             "ok": False,
             "mode": "discovery",
             "query": question,
-            "plan": plan,
+            "plan": _public_plan(plan),
             "message": message,
             "results": [],
         }
@@ -779,6 +1271,7 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
                 "resolved_by": seed.get("resolved_by"),
                 "uniprot_accession": seed.get("uniprot_accession"),
                 "evidence_class": seed.get("evidence_class"),
+                "evidence_types": seed.get("evidence_types"),
                 "reference_species": seed.get("reference_species"),
                 "reference_gene": seed.get("reference_gene"),
                 "ai_reason": seed.get("ai_reason"),
@@ -786,17 +1279,18 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
         )
 
     source_names = list(dict.fromkeys(str(seed.get("source")) for seed in seeds if seed.get("source")))
+    public_plan = _public_plan(plan)
     return {
         "ok": True,
         "mode": "discovery",
         "query": question,
-        "plan": plan,
-        "seed_source": "Zebrafish-first: " + "; ".join(source_names),
-        "retrieval_warning": retrieval_error,
+        "plan": public_plan,
+        "seed_source": "Evidence-ranked zebrafish: " + "; ".join(source_names),
+        "retrieval_warning": retrieval_warning,
         "seeds": public_seeds,
         "results": results,
         "ai_explanation": explain_discovery(question, plan, seeds, results),
-        "privacy": "Embeddings remain server-side. Gemini receives the biological question and compact protein metadata, never embedding vectors or database credentials.",
+        "privacy": "Embeddings remain server-side. Gemini receives the biological question and compact biological evidence, never embedding vectors or database credentials.",
     }
 
 
@@ -822,12 +1316,13 @@ def status_api() -> Dict[str, Any]:
         "ai_model": gemini_model() if ai_available() else None,
         "species_scope": "Danio rerio",
         "google_search_grounding": ai_available(),
+        "structured_evidence_sources": ["UniProtKB", "Ensembl"],
         "embedding_egress": False,
     }
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "ZebrafishESMDashboard/2.2"
+    server_version = "ZebrafishESMDashboard/2.3"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -902,7 +1397,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Open http://{args.host}:{args.port}")
     print(f"AI interpreter: {'enabled (' + gemini_model() + ')' if ai_available() else 'disabled; deterministic modes still work'}")
-    print("Biological discovery species scope: Danio rerio (zebrafish-first; mammalian orthology fallback only when needed)")
+    print("Biological discovery: evidence-ranked Danio rerio retrieval (UniProtKB + Ensembl + Google Search; mammalian orthology fallback only when needed)")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
