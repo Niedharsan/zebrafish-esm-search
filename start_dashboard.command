@@ -2,7 +2,7 @@
 
 set -u
 
-PROJECT_DIR="/Users/niedharsan/Downloads/Work/AI DATABASE/pg_zfish_project/zebrafish_esm_dashboard"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 DB_PATH="data/zebrafish_esm.db"
 HOST="127.0.0.1"
@@ -91,7 +91,7 @@ if port_busy "$PORT"; then
     echo "Opening it in your browser..."
     /usr/bin/open "$URL"
     echo
-    echo "Close the original dashboard launcher window to stop the dashboard."
+    echo "Close the original dashboard launcher window to stop it."
     read -r -p "Press Return to close this window. "
     exit 0
   fi
