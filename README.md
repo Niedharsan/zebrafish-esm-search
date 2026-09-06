@@ -54,6 +54,8 @@ ranked related proteins
 
 - Gemini API with Google Search grounding
 - Optional local Ollama interpretation
+- PubMed and Europe PMC literature retrieval
+- QuickGO Gene Ontology retrieval
 - UniProt REST API
 - Ensembl REST API
 - ESM protein embeddings
@@ -64,7 +66,8 @@ ranked related proteins
 - Final seed proteins and similarity results are restricted to *Danio rerio*.
 - Every AI-assisted candidate must resolve to an exact protein in the local zebrafish database before ESM search.
 - The SQLite database and embedding files remain local and are not committed to the repository.
-- Gemini never receives raw embedding vectors or database credentials.
+- AI providers and public retrieval services never receive raw embedding vectors or database credentials.
+- In Ollama mode, PubMed, Europe PMC, QuickGO, UniProt, and Ensembl receive question-derived public search terms; the model and embeddings remain local.
 - The API key remains server-side.
 - Exact protein lookup remains available without Gemini.
 
@@ -95,7 +98,7 @@ OLLAMA_MODEL=qwen3:4b-instruct
 OLLAMA_URL=http://127.0.0.1:11434
 ```
 
-The local model ranks candidate genes using its internal knowledge plus generic lexical context from the local zebrafish database, and is explicitly reported as not web-grounded. UniProt/Ensembl identity resolution and the local ESM similarity search remain unchanged.
+The local model ranks candidate genes using its internal knowledge, generic lexical context from the local zebrafish database, and live evidence retrieved from PubMed, Europe PMC, and QuickGO. UniProt/Ensembl identity resolution and the local ESM similarity search remain unchanged. These public services require no API key; optional `NCBI_EMAIL` and `NCBI_API_KEY` settings are supported for PubMed E-utilities.
 
 ## Run locally
 

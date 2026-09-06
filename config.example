@@ -2,7 +2,9 @@
 GEMINI_API_KEY=replace_with_your_server_side_key
 GEMINI_MODEL=gemini-2.5-flash-lite
 
-# Local alternative (no API key or web grounding):
+# Local model with public PubMed, Europe PMC, and QuickGO grounding:
 # AI_PROVIDER=ollama
 # OLLAMA_MODEL=qwen3:4b-instruct
 # OLLAMA_URL=http://127.0.0.1:11434
+# NCBI_EMAIL=you@example.com
+# NCBI_API_KEY=optional_ncbi_key

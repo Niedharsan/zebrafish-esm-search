@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import difflib
 import html
 import json
@@ -25,6 +26,9 @@ DB_PATH = "data/zebrafish_esm.db"
 HOST, PORT = "127.0.0.1", 5000
 UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
 ENSEMBL_REST_URL = "https://rest.ensembl.org"
+EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+NCBI_EUTILS_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+QUICKGO_SEARCH_URL = "https://www.ebi.ac.uk/QuickGO/services/ontology/go/search"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OLLAMA_MODEL = "qwen3:4b-instruct"
@@ -316,6 +320,18 @@ def _ollama_text(prompt: str) -> str:
     return text
 
 
+def _ollama_json(prompt: str) -> Tuple[Dict[str, Any], str]:
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        retry_instruction = "\nYour previous response failed. Return one complete valid JSON object only." if attempt else ""
+        try:
+            text = _ollama_text(prompt + retry_instruction)
+            return _parse_json_object(text), text
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Ollama failed to return valid JSON after one retry. ({last_error})") from last_error
+
+
 def _uniprot_gene(record: Dict[str, Any]) -> str:
     for gene in record.get("genes") or []:
         value = str(((gene or {}).get("geneName") or {}).get("value") or "").strip()
@@ -393,7 +409,7 @@ def _clean_candidates(values: Any, allowed_species: set[str], limit: int) -> Lis
     return out
 
 
-def _local_question_context(question: str, limit: int = 30) -> List[Dict[str, str]]:
+def _question_keywords(question: str) -> List[str]:
     stopwords = {
         "a", "an", "and", "are", "associated", "danio", "find", "for", "in", "involved",
         "mark", "of", "or", "protein", "proteins", "rerio", "the", "what", "which", "with",
@@ -404,6 +420,11 @@ def _local_question_context(question: str, limit: int = 30) -> List[Dict[str, st
         term = token[:-1] if token.endswith("s") and len(token) > 4 else token
         if len(term) >= 3 and term not in stopwords and term not in terms:
             terms.append(term)
+    return terms
+
+
+def _local_question_context(question: str, limit: int = 30) -> List[Dict[str, str]]:
+    terms = _question_keywords(question)
     if not terms:
         return []
 
@@ -435,6 +456,98 @@ def _local_question_context(question: str, limit: int = 30) -> List[Dict[str, st
     ]
 
 
+def _literature_query(question: str) -> str:
+    concept = " ".join(_question_keywords(question)[:8]) or question.strip()
+    return f'("Danio rerio" OR zebrafish) AND ({concept})'
+
+
+def fetch_europe_pmc_evidence(question: str, limit: int = 4) -> List[Dict[str, Any]]:
+    params = urlencode(
+        {"query": _literature_query(question), "format": "json", "pageSize": str(limit), "resultType": "core"}
+    )
+    payload = _http_json(f"{EUROPE_PMC_URL}?{params}")
+    return [
+        {
+            "source": "Europe PMC",
+            "title": str(item.get("title") or "")[:300],
+            "abstract": str(item.get("abstractText") or "")[:600],
+            "year": item.get("pubYear"),
+            "pmid": item.get("pmid"),
+            "doi": item.get("doi"),
+        }
+        for item in ((payload.get("resultList") or {}).get("result") or [])[:limit]
+    ]
+
+
+def fetch_pubmed_evidence(question: str, limit: int = 4) -> List[Dict[str, Any]]:
+    params = {
+        "db": "pubmed",
+        "term": _literature_query(question),
+        "retmode": "json",
+        "retmax": str(limit),
+        "sort": "relevance",
+        "tool": "zebrafish_esm_search",
+    }
+    if os.environ.get("NCBI_EMAIL"):
+        params["email"] = os.environ["NCBI_EMAIL"]
+    if os.environ.get("NCBI_API_KEY"):
+        params["api_key"] = os.environ["NCBI_API_KEY"]
+    search = _http_json(f"{NCBI_EUTILS_URL}/esearch.fcgi?{urlencode(params)}")
+    pmids = [str(value) for value in (search.get("esearchresult") or {}).get("idlist") or []]
+    if not pmids:
+        return []
+    summary_params = {"db": "pubmed", "id": ",".join(pmids), "retmode": "json", "tool": "zebrafish_esm_search"}
+    if os.environ.get("NCBI_EMAIL"):
+        summary_params["email"] = os.environ["NCBI_EMAIL"]
+    if os.environ.get("NCBI_API_KEY"):
+        summary_params["api_key"] = os.environ["NCBI_API_KEY"]
+    summary = _http_json(f"{NCBI_EUTILS_URL}/esummary.fcgi?{urlencode(summary_params)}")
+    result = summary.get("result") or {}
+    return [
+        {
+            "source": "PubMed",
+            "title": str((result.get(pmid) or {}).get("title") or "")[:300],
+            "year": str((result.get(pmid) or {}).get("pubdate") or "")[:20],
+            "pmid": pmid,
+        }
+        for pmid in pmids
+        if isinstance(result.get(pmid), dict)
+    ]
+
+
+def fetch_quickgo_evidence(question: str, limit: int = 5) -> List[Dict[str, Any]]:
+    query = " ".join(_question_keywords(question)[:8]) or question.strip()
+    params = urlencode({"query": query, "limit": str(limit), "page": "1"})
+    payload = _http_json(f"{QUICKGO_SEARCH_URL}?{params}", headers={"Accept": "application/json"})
+    return [
+        {
+            "source": "QuickGO",
+            "go_id": item.get("id"),
+            "name": str(item.get("name") or "")[:200],
+            "definition": str(((item.get("definition") or {}).get("text") if isinstance(item.get("definition"), dict) else item.get("definition")) or "")[:400],
+        }
+        for item in (payload.get("results") or [])[:limit]
+        if isinstance(item, dict)
+    ]
+
+
+def fetch_authoritative_evidence(question: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    sources = [
+        ("Europe PMC", fetch_europe_pmc_evidence),
+        ("PubMed", fetch_pubmed_evidence),
+        ("QuickGO", fetch_quickgo_evidence),
+    ]
+    evidence, errors = [], []
+    with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+        futures = [(name, pool.submit(fetcher, question)) for name, fetcher in sources]
+        for name, future in futures:
+            try:
+                evidence.extend(future.result())
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+    return evidence, errors
+
+
 def interpret_biological_query(question: str) -> Dict[str, Any]:
     question = question.strip()
     fallback = {
@@ -455,15 +568,19 @@ def interpret_biological_query(question: str) -> Dict[str, Any]:
 
     if ai_provider() == "ollama":
         local_context = _local_question_context(question)
+        authoritative_evidence, evidence_errors = fetch_authoritative_evidence(question)
         prompt = f"""Act as a zebrafish biologist selecting seed proteins for an ESM similarity search.
 
 USER QUESTION:
 {question}
 
-Identify the most biologically relevant Danio rerio genes or proteins using your internal knowledge. You have no web access, so do not claim that you searched sources or verified current literature.
+Identify the most biologically relevant Danio rerio genes or proteins using your internal knowledge and the retrieved evidence below. You cannot browse directly; cite only the evidence supplied by the application.
 
 LOCAL ZEBRAFISH DATABASE CONTEXT (lexical retrieval, not biological ranking):
 {json.dumps(local_context, ensure_ascii=False)}
+
+AUTHORITATIVE BIOLOGICAL EVIDENCE (live PubMed, Europe PMC, and QuickGO retrieval):
+{json.dumps(authoritative_evidence, ensure_ascii=False)}
 
 Rules:
 - Do not classify the question into a fixed category or use a hand-built scoring scheme.
@@ -487,13 +604,15 @@ Return only this JSON object:
 }}
 """
         try:
-            note = _ollama_text(prompt)
-            structured = _parse_json_object(note)
+            structured, note = _ollama_json(prompt)
         except Exception as exc:
             fallback["rationale"] = f"AI biological discovery is unavailable. ({exc})"
             return fallback
 
         zebrafish = _clean_candidates(structured.get("zebrafish_candidates"), {"zebrafish", "danio rerio"}, MAX_SEEDS)
+        evidence_source_names = list(
+            dict.fromkeys(str(item.get("source")) for item in authoritative_evidence if item.get("source"))
+        )
         return {
             "normalized_question": str(structured.get("normalized_question") or f"Danio rerio: {question}")[:240],
             "retrieval_terms": [candidate["gene"] for candidate in zebrafish],
@@ -501,16 +620,21 @@ Return only this JSON object:
             "reference_candidates": _clean_candidates(structured.get("reference_candidates"), {"human", "mouse"}, 6),
             "rationale": str(structured.get("rationale") or "Local-model zebrafish candidate selection.")[:800],
             "ai_used": True,
-            "search_grounded": False,
+            "search_grounded": bool(authoritative_evidence),
             "evidence_summary": {
-                "sources": ["Local Ollama model knowledge (not web-grounded)", "Local zebrafish database lexical context"],
-                "search_queries": 0,
+                "sources": [
+                    "Local Ollama model",
+                    "Local zebrafish database lexical context",
+                    *evidence_source_names,
+                ],
+                "search_queries": len(evidence_source_names),
                 "local_context_records": len(local_context),
+                "authoritative_evidence_records": len(authoritative_evidence),
                 "ranking_policy": "The local model proposes biological candidates; databases resolve identifiers.",
             },
             "_research_note": note,
             "_grounding_metadata": {},
-            "_retrieval_errors": [],
+            "_retrieval_errors": evidence_errors,
         }
 
     research_prompt = f"""Use Google Search before answering. Act as a zebrafish biologist selecting seed proteins for an ESM search.
@@ -811,8 +935,8 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
         "results": results,
         "ai_explanation": None,
         "privacy": (
-            "Embeddings and the biological question remain local. UniProt receives targeted public search terms; "
-            "no service receives vectors or database credentials."
+            "The model and embeddings remain local. PubMed, Europe PMC, QuickGO, UniProt, and Ensembl receive "
+            "question-derived public search terms; no service receives vectors or database credentials."
             if ai_provider() == "ollama"
             else "Embeddings remain local. Gemini sees the biological question; UniProt receives targeted public search terms. Neither receives vectors or database credentials."
         ),
@@ -841,7 +965,8 @@ def status_api() -> Dict[str, Any]:
         "ai_model": ai_model() if ai_available() else None,
         "species_scope": "Danio rerio",
         "google_search_grounding": ai_available() and ai_provider() == "gemini",
-        "structured_retrieval": ["UniProtKB", "Ensembl orthology fallback"],
+        "authoritative_biology_grounding": ai_available() and ai_provider() == "ollama",
+        "structured_retrieval": ["PubMed", "Europe PMC", "QuickGO", "UniProtKB", "Ensembl orthology fallback"],
         "embedding_egress": False,
     }
 

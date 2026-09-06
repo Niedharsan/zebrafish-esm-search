@@ -15,17 +15,17 @@ This report records one local benchmark run of `qwen3:4b-instruct` (4B, Q4_K_M) 
 
 The canonical-reference check is a transparent heuristic, not a biological gold-standard accuracy score. A reference miss can still contain relevant biology—for example, the general macrophage query returned and validated `c1qa`—while a validated identifier is not by itself proof that every proposed protein is relevant to the question.
 
-## Post-benchmark macrophage fix and retest
+## Post-benchmark retrieval improvements and macrophage retest
 
 The original broad prompt, “Which proteins mark zebrafish macrophages?”, did not return `mpeg1.1`. Unlike the Gemini path, which uses zebrafish-specific Google Search grounding, the initial Ollama path relied entirely on the 4B model's internal knowledge. It consequently favored mammalian-style immune markers such as `ms4a1a`, `tlr4`, and `ccl2`.
 
-The Ollama path was subsequently given generic lexical context from the local zebrafish database before candidate ranking. This is not a macrophage-specific rule: the same retrieval step finds database descriptions matching the meaningful words in any biological question and supplies their exact local gene symbols to the model.
+The Ollama path was subsequently given generic lexical context from the local zebrafish database before candidate ranking. This is not a macrophage-specific rule: the same retrieval step finds database descriptions matching the meaningful words in any biological question and supplies their exact local gene symbols to the model. A later iteration added live authoritative retrieval from PubMed, Europe PMC, and QuickGO; UniProt and Ensembl remain the deterministic identifier-validation layer.
 
-A real post-fix run of the same prompt returned and validated all of these seeds:
+A real run of the same prompt with authoritative retrieval returned 13 evidence records (4 Europe PMC, 4 PubMed, and 5 QuickGO) and validated all of these seeds:
 
-`csf1a`, `csf1b`, `marco`, `mrc1a`, `mrc1b`, `mif`, `mpeg1.1`, `mpeg1.2`, `slc11a2`, `csf1r`
+`csf1a`, `mif`, `mrc1a`, `marco`, `mpeg1.1`, `slc11a2`, `csf1r`, `macir`, `mmd2a`, `mst1ra`
 
-The resulting top five ESM neighbors were `kita`, `ly75`, `flt4`, `pdgfra`, and `kitb`. The aggregate figures below remain the original pre-fix 24-question baseline; a complete post-fix rerun would be required before updating those aggregate measurements.
+The resulting top five ESM neighbors were `mst1rb`, `mpeg1.2`, `kita`, `flt4`, and `pdgfra`. End-to-end latency was 88.14 seconds. The aggregate figures below remain the original pre-fix 24-question baseline; a complete post-fix rerun would be required before updating those aggregate measurements.
 
 ## Aggregate case table
 
