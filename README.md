@@ -53,6 +53,7 @@ ranked related proteins
 ## Integrations
 
 - Gemini API with Google Search grounding
+- Optional local Ollama interpretation
 - UniProt REST API
 - Ensembl REST API
 - ESM protein embeddings
@@ -85,6 +86,16 @@ cp config.example .env
 GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
+
+To use a local Ollama model instead of Gemini, configure:
+
+```text
+AI_PROVIDER=ollama
+OLLAMA_MODEL=qwen3:4b-instruct
+OLLAMA_URL=http://127.0.0.1:11434
+```
+
+The local model proposes candidate genes from its internal knowledge and is explicitly reported as not web-grounded. UniProt/Ensembl identity resolution and the local ESM similarity search remain unchanged.
 
 ## Run locally
 
@@ -128,3 +139,9 @@ An optional live integration test uses the local API key and private database to
 ```
 
 The live test covers macrophage discovery and a non-macrophage Wnt signaling query. It is intentionally excluded from public CI because it requires local credentials and data.
+
+Run the 24-question local-model benchmark with:
+
+```bash
+.venv/bin/python scripts/benchmark_local_model.py --json-out local_4b_benchmark.json
+```

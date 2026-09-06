@@ -27,6 +27,8 @@ UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
 ENSEMBL_REST_URL = "https://rest.ensembl.org"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_OLLAMA_MODEL = "qwen3:4b-instruct"
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 HTTP_TIMEOUT_SECONDS = 15
 MAX_SEEDS = 10
 
@@ -60,8 +62,28 @@ def gemini_model() -> str:
     return os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
 
 
+def ai_provider() -> str:
+    return os.environ.get("AI_PROVIDER", "gemini").strip().lower() or "gemini"
+
+
+def ollama_model() -> str:
+    return os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
+
+
+def ollama_url() -> str:
+    return os.environ.get("OLLAMA_URL", DEFAULT_OLLAMA_URL).strip().rstrip("/") or DEFAULT_OLLAMA_URL
+
+
+def ai_model() -> str:
+    return ollama_model() if ai_provider() == "ollama" else gemini_model()
+
+
+def ai_label() -> str:
+    return "Local Ollama" if ai_provider() == "ollama" else "Gemini"
+
+
 def ai_available() -> bool:
-    return bool(gemini_api_key())
+    return bool(ollama_model()) if ai_provider() == "ollama" else bool(gemini_api_key())
 
 
 def load_database(db_path: str) -> None:
@@ -201,7 +223,13 @@ def search_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
     }
 
 
-def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Optional[bytes] = None) -> Any:
+def _http_json(
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    data: Optional[bytes] = None,
+    timeout: int = HTTP_TIMEOUT_SECONDS,
+) -> Any:
     req = Request(
         url,
         data=data,
@@ -209,7 +237,7 @@ def _http_json(url: str, *, headers: Optional[Dict[str, str]] = None, data: Opti
         method="POST" if data is not None else "GET",
     )
     try:
-        with urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:500]
@@ -265,6 +293,27 @@ def _gemini_response(prompt: str, *, use_google_search: bool = False) -> Tuple[s
 
 def _gemini_text(prompt: str, *, use_google_search: bool = False) -> str:
     return _gemini_response(prompt, use_google_search=use_google_search)[0]
+
+
+def _ollama_text(prompt: str) -> str:
+    payload = {
+        "model": ollama_model(),
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 1200},
+    }
+    response = _http_json(
+        f"{ollama_url()}/api/generate",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(payload).encode(),
+        timeout=120,
+    )
+    text = str(response.get("response") or "").strip()
+    if not text:
+        raise RuntimeError("Ollama returned no text.")
+    return text
 
 
 def _uniprot_gene(record: Dict[str, Any]) -> str:
@@ -362,6 +411,60 @@ def interpret_biological_query(question: str) -> Dict[str, Any]:
     if not ai_available():
         return fallback
 
+    if ai_provider() == "ollama":
+        prompt = f"""Act as a zebrafish biologist selecting seed proteins for an ESM similarity search.
+
+USER QUESTION:
+{question}
+
+Identify the most biologically relevant Danio rerio genes or proteins using your internal knowledge. You have no web access, so do not claim that you searched sources or verified current literature.
+
+Rules:
+- Do not classify the question into a fixed category or use a hand-built scoring scheme.
+- Keep broad questions broad; do not silently narrow a pathway, process, or cell-type question.
+- Prefer canonical, commonly used, directly relevant zebrafish genes over lexical overlap.
+- Use exact zebrafish gene symbols when known, including zebrafish paralog suffixes such as a/b or .1/.2.
+- Put uncertain human or mouse candidates in reference_candidates so Ensembl can resolve orthologs.
+- Return at most {MAX_SEEDS} zebrafish candidates and at most 6 reference candidates.
+
+Return only this JSON object:
+{{
+  "normalized_question": "...",
+  "zebrafish_candidates": [
+    {{"gene":"exact zebrafish symbol","species":"zebrafish","uniprot_accession":"","reason":"short reason"}}
+  ],
+  "reference_candidates": [
+    {{"gene":"human or mouse symbol","species":"human or mouse","reason":"why fallback evidence matters"}}
+  ],
+  "rationale": "brief summary, including uncertainty where appropriate"
+}}
+"""
+        try:
+            note = _ollama_text(prompt)
+            structured = _parse_json_object(note)
+        except Exception as exc:
+            fallback["rationale"] = f"AI biological discovery is unavailable. ({exc})"
+            return fallback
+
+        zebrafish = _clean_candidates(structured.get("zebrafish_candidates"), {"zebrafish", "danio rerio"}, MAX_SEEDS)
+        return {
+            "normalized_question": str(structured.get("normalized_question") or f"Danio rerio: {question}")[:240],
+            "retrieval_terms": [candidate["gene"] for candidate in zebrafish],
+            "zebrafish_candidates": zebrafish,
+            "reference_candidates": _clean_candidates(structured.get("reference_candidates"), {"human", "mouse"}, 6),
+            "rationale": str(structured.get("rationale") or "Local-model zebrafish candidate selection.")[:800],
+            "ai_used": True,
+            "search_grounded": False,
+            "evidence_summary": {
+                "sources": ["Local Ollama model knowledge (not web-grounded)"],
+                "search_queries": 0,
+                "ranking_policy": "The local model proposes biological candidates; databases resolve identifiers.",
+            },
+            "_research_note": note,
+            "_grounding_metadata": {},
+            "_retrieval_errors": [],
+        }
+
     research_prompt = f"""Use Google Search before answering. Act as a zebrafish biologist selecting seed proteins for an ESM search.
 
 USER QUESTION:
@@ -438,7 +541,7 @@ Preserve the note's biological ranking. Do not use UniProt search position as th
 def _uniprot_match(record: Dict[str, Any], term: str) -> Tuple[bool, str]:
     key = term.strip().lower()
     if not key:
-        return False, "empty Gemini term"
+        return False, "empty AI term"
     gene = str(record.get("gene") or "").strip()
     accession = str(record.get("uniprot_accession") or "").strip()
     synonyms = [str(value).strip() for value in record.get("gene_synonyms") or []]
@@ -483,7 +586,7 @@ def resolve_targeted_uniprot_candidates(
                 seeds.append(
                     {
                         "index": idx,
-                        "source": "Gemini research → targeted UniProt",
+                        "source": f"{ai_label()} interpretation → targeted UniProt",
                         "retrieval_term": term,
                         "resolved_by": reason,
                         "uniprot_accession": record.get("uniprot_accession"),
@@ -502,7 +605,7 @@ def resolve_targeted_uniprot_candidates(
                 seeds.append(
                     {
                         "index": idx,
-                        "source": "Gemini research → exact local validation",
+                        "source": f"{ai_label()} interpretation → exact local validation",
                         "retrieval_term": term,
                         "resolved_by": "exact local zebrafish gene",
                         "uniprot_accession": "",
@@ -659,7 +762,12 @@ def discovery_api(params: Dict[str, List[str]]) -> Dict[str, Any]:
         "seeds": public_seeds,
         "results": results,
         "ai_explanation": None,
-        "privacy": "Embeddings remain local. Gemini sees the biological question; UniProt receives targeted public search terms. Neither receives vectors or database credentials.",
+        "privacy": (
+            "Embeddings and the biological question remain local. UniProt receives targeted public search terms; "
+            "no service receives vectors or database credentials."
+            if ai_provider() == "ollama"
+            else "Embeddings remain local. Gemini sees the biological question; UniProt receives targeted public search terms. Neither receives vectors or database credentials."
+        ),
     }
 
 
@@ -681,9 +789,10 @@ def status_api() -> Dict[str, Any]:
         "ok": True,
         "protein_count": len(PROTEINS),
         "ai_available": ai_available(),
-        "ai_model": gemini_model() if ai_available() else None,
+        "ai_provider": ai_provider() if ai_available() else None,
+        "ai_model": ai_model() if ai_available() else None,
         "species_scope": "Danio rerio",
-        "google_search_grounding": ai_available(),
+        "google_search_grounding": ai_available() and ai_provider() == "gemini",
         "structured_retrieval": ["UniProtKB", "Ensembl orthology fallback"],
         "embedding_egress": False,
     }
@@ -759,8 +868,8 @@ def main() -> None:
     load_database(args.db)
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Open http://{args.host}:{args.port}")
-    print(f"AI interpreter: {'enabled (' + gemini_model() + ')' if ai_available() else 'disabled; deterministic modes still work'}")
-    print("Biological discovery: Gemini research → deterministic zebrafish validation → ESM similarity")
+    print(f"AI interpreter: {'enabled (' + ai_provider() + ': ' + ai_model() + ')' if ai_available() else 'disabled; deterministic modes still work'}")
+    print(f"Biological discovery: {ai_label()} interpretation → deterministic zebrafish validation → ESM similarity")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
