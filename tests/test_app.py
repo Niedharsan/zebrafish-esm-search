@@ -11,6 +11,7 @@ import app
 class DashboardTests(unittest.TestCase):
     def setUp(self):
         self.old_key = os.environ.pop("GEMINI_API_KEY", None)
+        self.old_provider = os.environ.pop("AI_PROVIDER", None)
         app.PROTEINS = [
             {"protein_id": "P1", "name": "gata1a", "description": "erythroid transcription factor", "sequence": "", "extra_json": "{}"},
             {"protein_id": "tr|Q7SXE0|Q7SXE0_DANRE", "name": "mpeg1.1", "description": "Macrophage-expressed gene 1 protein", "sequence": "", "extra_json": "{}"},
@@ -28,6 +29,10 @@ class DashboardTests(unittest.TestCase):
             os.environ.pop("GEMINI_API_KEY", None)
         else:
             os.environ["GEMINI_API_KEY"] = self.old_key
+        if self.old_provider is None:
+            os.environ.pop("AI_PROVIDER", None)
+        else:
+            os.environ["AI_PROVIDER"] = self.old_provider
 
     def test_exact_lookup_stays_deterministic(self):
         result = app.search_api({"q": ["mpeg1.1"], "k": ["2"]})
@@ -57,6 +62,63 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(grounding["webSearchQueries"], ["zebrafish macrophage markers"])
         self.assertEqual(payload["tools"], [{"google_search": {}}])
         self.assertNotIn("responseMimeType", payload["generationConfig"])
+
+    @patch("app._http_json")
+    def test_ollama_payload_uses_local_json_generation(self, mock_http):
+        os.environ["AI_PROVIDER"] = "ollama"
+        mock_http.return_value = {"response": '{"zebrafish_candidates": []}'}
+        text = app._ollama_text("x")
+        payload = json.loads(mock_http.call_args.kwargs["data"].decode())
+        self.assertEqual(text, '{"zebrafish_candidates": []}')
+        self.assertEqual(payload["model"], "qwen3:4b-instruct")
+        self.assertEqual(payload["format"], "json")
+        self.assertFalse(payload["stream"])
+        self.assertFalse(payload["think"])
+        self.assertEqual(payload["options"]["num_predict"], 1200)
+        self.assertEqual(mock_http.call_args.args[0], "http://127.0.0.1:11434/api/generate")
+
+    @patch("app._ollama_text", side_effect=["not JSON", '{"zebrafish_candidates": []}'])
+    def test_ollama_json_retries_one_invalid_response(self, mock_text):
+        parsed, _ = app._ollama_json("prompt")
+        self.assertEqual(parsed, {"zebrafish_candidates": []})
+        self.assertEqual(mock_text.call_count, 2)
+        self.assertIn("previous response failed", mock_text.call_args.args[0])
+
+    @patch("app._ollama_text")
+    @patch("app.fetch_authoritative_evidence")
+    def test_ollama_interpretation_uses_authoritative_grounding(self, mock_evidence, mock_text):
+        os.environ["AI_PROVIDER"] = "ollama"
+        mock_evidence.return_value = ([{"source": "PubMed", "title": "Zebrafish macrophage markers"}], [])
+        mock_text.return_value = json.dumps({
+            "normalized_question": "zebrafish macrophage proteins",
+            "zebrafish_candidates": [{"gene": "mpeg1.1", "species": "zebrafish", "reason": "marker"}],
+            "reference_candidates": [],
+            "rationale": "Local candidate selection.",
+        })
+        plan = app.interpret_biological_query("macrophage proteins")
+        self.assertTrue(plan["ai_used"])
+        self.assertTrue(plan["search_grounded"])
+        self.assertEqual(plan["retrieval_terms"], ["mpeg1.1"])
+        self.assertIn("live PubMed, Europe PMC, and QuickGO retrieval", mock_text.call_args.args[0])
+        self.assertIn("Zebrafish macrophage markers", mock_text.call_args.args[0])
+        self.assertIn('"gene": "mpeg1.1"', mock_text.call_args.args[0])
+        self.assertEqual(plan["evidence_summary"]["search_queries"], 1)
+        self.assertEqual(plan["evidence_summary"]["local_context_records"], 1)
+        self.assertEqual(plan["evidence_summary"]["authoritative_evidence_records"], 1)
+
+    def test_local_question_context_exposes_exact_zebrafish_macrophage_symbol(self):
+        context = app._local_question_context("Which proteins mark zebrafish macrophages?")
+        self.assertEqual([item["gene"] for item in context], ["mpeg1.1"])
+
+    @patch("app._http_json")
+    def test_europe_pmc_retrieval_is_zebrafish_scoped(self, mock_http):
+        mock_http.return_value = {"resultList": {"result": [{"title": "Macrophages", "pmid": "123"}]}}
+        evidence = app.fetch_europe_pmc_evidence("macrophage proteins")
+        self.assertEqual(evidence[0]["source"], "Europe PMC")
+        called_url = mock_http.call_args.args[0]
+        self.assertIn("Danio+rerio", called_url)
+        self.assertIn("zebrafish", called_url)
+        self.assertIn("macrophage", called_url)
 
     @patch("app._http_json")
     def test_targeted_uniprot_search_is_zebrafish(self, mock_http):

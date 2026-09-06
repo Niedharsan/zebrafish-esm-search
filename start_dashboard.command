@@ -8,7 +8,6 @@ DB_PATH="data/zebrafish_esm.db"
 HOST="127.0.0.1"
 PRIMARY_PORT="8000"
 FALLBACK_PORT="3000"
-DASHBOARD_MARKER="Zebrafish ESM Similarity"
 SERVER_PID=""
 
 print_error() {
@@ -20,7 +19,16 @@ print_error() {
 
 dashboard_ready() {
   local port="$1"
-  /usr/bin/curl -fsS --max-time 1 "http://${HOST}:${port}/" 2>/dev/null | /usr/bin/grep -q "$DASHBOARD_MARKER"
+  local status
+  status=$(/usr/bin/curl -fsS --max-time 1 "http://${HOST}:${port}/api/status" 2>/dev/null) || return 1
+  printf '%s' "$status" | "$VENV_DIR/bin/python" -c '
+import json, sys
+try:
+    status = json.load(sys.stdin)
+    sys.exit(0 if isinstance(status, dict) and status.get("ok") is True else 1)
+except (ValueError, TypeError):
+    sys.exit(1)
+'
 }
 
 port_busy() {
