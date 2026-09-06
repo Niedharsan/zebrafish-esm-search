@@ -145,3 +145,7 @@ Run the 24-question local-model benchmark with:
 ```bash
 .venv/bin/python scripts/benchmark_local_model.py --json-out local_4b_benchmark.json
 ```
+
+In one local run of `qwen3:4b-instruct`, 23 of 24 questions produced at least one deterministically validated zebrafish ESM seed, and 17 of 24 included at least one predefined canonical reference gene. Median end-to-end latency was 25.25 seconds. Reference overlap is a diagnostic benchmark measure rather than a biological accuracy score, and no paired Gemini comparison was performed.
+
+See the [complete local Qwen3 4B benchmark](docs/local-qwen3-4b-benchmark.md) for all prompts, candidate genes, validated seeds, ESM neighbors, timing, limitations, and suggested CV wording.
