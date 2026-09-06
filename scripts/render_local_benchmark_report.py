@@ -53,6 +53,23 @@ def render(payload: Dict[str, Any]) -> str:
         "A reference miss can still contain relevant biology—for example, the general macrophage query returned and validated `c1qa`—" 
         "while a validated identifier is not by itself proof that every proposed protein is relevant to the question.",
         "",
+        "## Post-benchmark macrophage fix and retest",
+        "",
+        "The original broad prompt, “Which proteins mark zebrafish macrophages?”, did not return `mpeg1.1`. Unlike the Gemini path, "
+        "which uses zebrafish-specific Google Search grounding, the initial Ollama path relied entirely on the 4B model's internal knowledge. "
+        "It consequently favored mammalian-style immune markers such as `ms4a1a`, `tlr4`, and `ccl2`.",
+        "",
+        "The Ollama path was subsequently given generic lexical context from the local zebrafish database before candidate ranking. "
+        "This is not a macrophage-specific rule: the same retrieval step finds database descriptions matching the meaningful words in any "
+        "biological question and supplies their exact local gene symbols to the model.",
+        "",
+        "A real post-fix run of the same prompt returned and validated all of these seeds:",
+        "",
+        "`csf1a`, `csf1b`, `marco`, `mrc1a`, `mrc1b`, `mif`, `mpeg1.1`, `mpeg1.2`, `slc11a2`, `csf1r`",
+        "",
+        "The resulting top five ESM neighbors were `kita`, `ly75`, `flt4`, `pdgfra`, and `kitb`. The aggregate figures below remain the "
+        "original pre-fix 24-question baseline; a complete post-fix rerun would be required before updating those aggregate measurements.",
+        "",
         "## Aggregate case table",
         "",
         "| # | Category | Prompt | Reference outcome | Validated seeds | Seconds |",

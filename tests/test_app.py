@@ -91,7 +91,13 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(plan["search_grounded"])
         self.assertEqual(plan["retrieval_terms"], ["mpeg1.1"])
         self.assertIn("no web access", mock_text.call_args.args[0])
+        self.assertIn('"gene": "mpeg1.1"', mock_text.call_args.args[0])
         self.assertEqual(plan["evidence_summary"]["search_queries"], 0)
+        self.assertEqual(plan["evidence_summary"]["local_context_records"], 1)
+
+    def test_local_question_context_exposes_exact_zebrafish_macrophage_symbol(self):
+        context = app._local_question_context("Which proteins mark zebrafish macrophages?")
+        self.assertEqual([item["gene"] for item in context], ["mpeg1.1"])
 
     @patch("app._http_json")
     def test_targeted_uniprot_search_is_zebrafish(self, mock_http):

@@ -95,7 +95,7 @@ OLLAMA_MODEL=qwen3:4b-instruct
 OLLAMA_URL=http://127.0.0.1:11434
 ```
 
-The local model proposes candidate genes from its internal knowledge and is explicitly reported as not web-grounded. UniProt/Ensembl identity resolution and the local ESM similarity search remain unchanged.
+The local model ranks candidate genes using its internal knowledge plus generic lexical context from the local zebrafish database, and is explicitly reported as not web-grounded. UniProt/Ensembl identity resolution and the local ESM similarity search remain unchanged.
 
 ## Run locally
 

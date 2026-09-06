@@ -393,6 +393,48 @@ def _clean_candidates(values: Any, allowed_species: set[str], limit: int) -> Lis
     return out
 
 
+def _local_question_context(question: str, limit: int = 30) -> List[Dict[str, str]]:
+    stopwords = {
+        "a", "an", "and", "are", "associated", "danio", "find", "for", "in", "involved",
+        "mark", "of", "or", "protein", "proteins", "rerio", "the", "what", "which", "with",
+        "zebrafish",
+    }
+    terms = []
+    for token in re.findall(r"[a-z0-9.]+", question.lower()):
+        term = token[:-1] if token.endswith("s") and len(token) > 4 else token
+        if len(term) >= 3 and term not in stopwords and term not in terms:
+            terms.append(term)
+    if not terms:
+        return []
+
+    scored = []
+    for protein in PROTEINS:
+        gene = str(protein.get("name") or "").strip()
+        description = str(protein.get("description") or "").strip()
+        protein_id = str(protein.get("protein_id") or "").strip()
+        gene_lower, description_lower = gene.lower(), description.lower()
+        score = 0
+        for term in terms:
+            if gene_lower == term:
+                score += 12
+            if re.search(rf"\b{re.escape(term)}\b", description_lower):
+                score += 4
+        if not score:
+            continue
+        if gene and not gene_lower.startswith(("loc", "si:", "zgc:")):
+            score += 1
+        evidence = re.search(r"\bPE=(\d)\b", description)
+        if evidence:
+            score += max(0, 3 - int(evidence.group(1)))
+        scored.append((score, gene_lower, gene, protein_id, description))
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [
+        {"gene": gene, "protein_id": protein_id, "description": description[:220]}
+        for _, _, gene, protein_id, description in scored[:limit]
+    ]
+
+
 def interpret_biological_query(question: str) -> Dict[str, Any]:
     question = question.strip()
     fallback = {
@@ -412,6 +454,7 @@ def interpret_biological_query(question: str) -> Dict[str, Any]:
         return fallback
 
     if ai_provider() == "ollama":
+        local_context = _local_question_context(question)
         prompt = f"""Act as a zebrafish biologist selecting seed proteins for an ESM similarity search.
 
 USER QUESTION:
@@ -419,10 +462,14 @@ USER QUESTION:
 
 Identify the most biologically relevant Danio rerio genes or proteins using your internal knowledge. You have no web access, so do not claim that you searched sources or verified current literature.
 
+LOCAL ZEBRAFISH DATABASE CONTEXT (lexical retrieval, not biological ranking):
+{json.dumps(local_context, ensure_ascii=False)}
+
 Rules:
 - Do not classify the question into a fixed category or use a hand-built scoring scheme.
 - Keep broad questions broad; do not silently narrow a pathway, process, or cell-type question.
 - Prefer canonical, commonly used, directly relevant zebrafish genes over lexical overlap.
+- Use the local database context to recognize exact zebrafish symbols, but keep only entries that are biologically relevant to the question.
 - Use exact zebrafish gene symbols when known, including zebrafish paralog suffixes such as a/b or .1/.2.
 - Put uncertain human or mouse candidates in reference_candidates so Ensembl can resolve orthologs.
 - Return at most {MAX_SEEDS} zebrafish candidates and at most 6 reference candidates.
@@ -456,8 +503,9 @@ Return only this JSON object:
             "ai_used": True,
             "search_grounded": False,
             "evidence_summary": {
-                "sources": ["Local Ollama model knowledge (not web-grounded)"],
+                "sources": ["Local Ollama model knowledge (not web-grounded)", "Local zebrafish database lexical context"],
                 "search_queries": 0,
+                "local_context_records": len(local_context),
                 "ranking_policy": "The local model proposes biological candidates; databases resolve identifiers.",
             },
             "_research_note": note,
