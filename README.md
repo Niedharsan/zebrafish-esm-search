@@ -1,120 +1,154 @@
-# Zebrafish ESM Search
+# Zebrafish Protein Search
 
-AI-assisted zebrafish protein discovery combining whole-proteome ESM embeddings, a local zebrafish protein database, cloud or local language-model interpretation, authoritative biological retrieval, and deterministic protein identity validation.
+**ESM + grounded AI discovery for the *Danio rerio* proteome.**
 
-The dashboard supports both direct protein lookup and natural-language biological discovery. Its final search space is always *Danio rerio*.
+A local scientific search system that combines whole-proteome ESM embeddings, deterministic protein lookup, local/open-weight LLM reasoning, biological APIs, and exact zebrafish identifier validation.
 
-## What is indexed
+The current private search database contains **22,523 zebrafish proteins**, represented by **2,560-dimensional ESMC 6B embeddings** and searched locally by cosine similarity.
 
-The current private search database contains:
+![Zebrafish protein search dashboard](docs/images/dashboard-overview.jpg)
 
-- 22,523 zebrafish proteins
-- 2,560-dimensional protein embeddings
-- SQLite metadata
-- NumPy cosine-similarity search
+## What it does
 
-The embedding dataset was generated with the pretrained EvolutionaryScale ESMC 6B model through the Forge API. Forge is used to generate the reusable embedding dataset; normal dashboard searches run against the local database and do not require a new ESMC inference call.
+The dashboard has two complementary search modes.
 
-## Search modes
+### 1. Deterministic protein lookup
 
-### Protein lookup
-
-Enter a gene symbol, UniProt accession, or protein identifier such as:
+Enter an exact gene symbol, UniProt accession, or protein identifier. The query is resolved against the local zebrafish database and used directly as an ESM seed. No LLM is required.
 
 ```text
-mpeg1.1
-gata1a
-mpx
-Q7SXE0
+protein / gene / ID
+        ↓
+exact local identity resolution
+        ↓
+local ESM cosine similarity
+        ↓
+ranked zebrafish proteins
 ```
 
-The application resolves the protein deterministically against the local database and returns the closest zebrafish proteins by ESM embedding similarity. This mode does not require an LLM.
+Example: `mpx`
 
-### Biological discovery
+![Deterministic mpx protein lookup](docs/images/protein-lookup-mpx.jpg)
 
-Ask a biological question in natural language, for example:
+### 2. Biological-question discovery
+
+Ask a biological question such as:
 
 ```text
 Which proteins mark zebrafish macrophages?
-Which zebrafish proteins are involved in Wnt signaling?
-Find proteins involved in autophagy.
-Which proteins regulate erythropoiesis in zebrafish?
-Find proteins associated with fin regeneration.
-Which proteins are related to cilia?
-Which proteins are involved in pigmentation?
+Which proteins are involved in canonical Wnt signalling in zebrafish?
+Which genes regulate zebrafish erythropoiesis?
+Which proteins are associated with fin regeneration?
 ```
 
-The language-model layer interprets the biological question and proposes candidate proteins. Those candidates must then resolve to real zebrafish proteins before they can seed ESM similarity search.
+The AI layer interprets the question and proposes biologically relevant candidates. Candidate identifiers are then resolved against zebrafish-specific resources and the local database before they are allowed to seed the ESM search.
 
 ```text
-Biological question
+biological question
         ↓
-LLM biological interpretation
+Qwen3 4B biological interpretation
         ↓
-scientific retrieval + biological APIs
+scientific retrieval / biological APIs
         ↓
-validated zebrafish seed proteins
+exact zebrafish validation
         ↓
-local ESM embedding similarity
+validated seed proteins
         ↓
-ranked related proteins
+local ESM similarity search
+        ↓
+ranked discovery candidates
 ```
 
-## Two AI paths
+![AI-assisted macrophage discovery](docs/images/biological-discovery-macrophage.jpg)
 
-### Gemini + Google Search grounding
+## Why the architecture is split
 
-The Gemini path uses zebrafish-specific Google Search grounding to identify biologically relevant candidates, followed by UniProt/Ensembl resolution and exact local validation.
+The language model is used for **biological interpretation and ranking**, not as the authority for protein identity.
 
-### Local Qwen3 4B + scientific tools
+A fluent answer can still contain the wrong zebrafish symbol, a mammalian-style gene name, or a biologically related protein that is not a good answer to the question. The system therefore separates responsibilities:
 
-The local path runs `qwen3:4b-instruct` through Ollama. Rather than trusting the small model's internal knowledge alone, the application augments it with:
+- **Qwen3 4B / Gemini:** biological interpretation and candidate selection
+- **PubMed / Europe PMC / QuickGO:** scientific evidence
+- **UniProt / Ensembl / local DB:** identifier resolution and validation
+- **ESMC 6B embeddings:** protein-representation similarity and candidate expansion
 
-- lexical context from the local zebrafish protein metadata
-- PubMed retrieval
-- Europe PMC retrieval
-- QuickGO / Gene Ontology retrieval
-- UniProt REST validation
-- Ensembl orthology/identifier support
-- local ESM similarity search
+Only proteins that resolve to the local *Danio rerio* search space can seed the final ESM search.
 
-The Qwen model itself remains local. Public biological services receive only question-derived search terms; raw embedding vectors and the local database are not sent to them.
+## Protein embeddings
 
-This architecture is designed to test a practical question: **how far can a small local open-weight model be improved for a narrow scientific workflow by giving it domain-specific retrieval, authoritative APIs, deterministic validation, and a specialist protein-embedding search tool?** The model weights are not fine-tuned; the improvement comes from system-level domain augmentation and validation.
+The embedding dataset was generated with the pretrained **EvolutionaryScale ESMC 6B** model through the Forge API.
 
-## Reliability design
+Current local dataset:
 
-The LLM is not the authority for protein identity.
+- **22,523** zebrafish proteins
+- **2,560-dimensional** mean-pooled protein embeddings
+- SQLite protein metadata
+- NumPy cosine-similarity search
 
-A proposed candidate can enter the ESM search only if it resolves to an actual zebrafish protein through targeted biological resolution and the local database. This separates responsibilities:
+ESMC is used to generate the reusable embedding dataset. Normal dashboard searches operate on the local vectors and do not require a new ESM inference call.
 
-- **LLM:** biological interpretation and candidate ranking
-- **PubMed / Europe PMC / QuickGO:** external scientific evidence
-- **UniProt / Ensembl / local DB:** identity resolution and validation
-- **ESM:** protein-representation similarity and candidate expansion
+## Local Qwen path
 
-This is important because a small general-purpose model can understand the biological concept while still producing inaccurate zebrafish nomenclature. The surrounding scientific tools are intended to correct that weakness rather than simply trusting fluent model output.
+The local AI path runs **`qwen3:4b-instruct` through Ollama**. The model weights are unchanged; adaptation happens at the system level through zebrafish-specific context, retrieval, tools, deterministic validation, and benchmarking.
 
-## Integrations
+Current scientific integrations include:
 
-- EvolutionaryScale Forge API / ESMC 6B
-- Gemini API with Google Search grounding
-- Ollama + Qwen3 4B local inference
+- local zebrafish protein metadata
 - PubMed E-utilities
 - Europe PMC
 - QuickGO / Gene Ontology
-- UniProt REST API
-- Ensembl REST API
-- SQLite and NumPy
+- UniProt REST
+- Ensembl REST
+- local ESM similarity search
 
-## Privacy and species boundaries
+The model and embedding database remain local. Public biological services receive only query-derived terms; raw embedding vectors and local database credentials are not sent to them.
 
-- Final seed proteins and similarity results are restricted to *Danio rerio*.
-- Every AI-assisted candidate must resolve to an exact protein in the local zebrafish database before ESM search.
-- The SQLite database and embedding files remain local and are not committed to the repository.
-- AI providers and public retrieval services never receive raw embedding vectors or database credentials.
-- In Ollama mode, the language model and embeddings remain local.
-- Exact protein lookup remains available without an LLM.
+## Benchmarking
+
+The project is benchmarked at the **system level**, not only by whether the LLM returns a syntactically valid gene name.
+
+The most important diagnostic is whether the ranked validated seed list recovers predefined **canonical zebrafish reference genes**. Canonical overlap is useful for comparison, but it is **not treated as biological accuracy** because the reference lists are intentionally non-exhaustive.
+
+### Hard-25 development stress test
+
+A 25-question challenge set was selected from the first 50 paired benchmark cases to concentrate on difficult failures: cases where the earlier augmented system lost a canonical answer, cases where neither system found one, plus a known macrophage rescue control.
+
+Because this set was deliberately selected for difficulty, **it is a development stress test and not an unbiased estimate of general performance**.
+
+| Architecture | Any canonical hit | Mean canonical recall | Hit@1 | MRR | Unresolved proposed IDs | Median latency |
+|---|---:|---:|---:|---:|---:|---:|
+| Base Qwen3 4B | 76% | 31% | 60% | 0.673 | 45.7% | 21.6 s |
+| **Qwen → scientific tools → Qwen rerank** | **80%** | **32%** | **60%** | **0.673** | **21.5%** | 111.7 s |
+| Local metadata → Qwen | 12% | 4% | 0% | 0.047 | **1.7%** | 25.2 s |
+
+The key result is that **reason-first tool augmentation preserved roughly the same canonical ranking performance as the base model while substantially reducing invalid/unresolvable zebrafish identifiers**. Local lexical context alone produced very clean identifiers but strongly degraded biological ranking on this difficult set.
+
+The benchmark records:
+
+- canonical hit / recall / Hit@1 / Hit@3 / Hit@5 / MRR
+- proposed and unresolved genes
+- deterministically validated seeds
+- raw model outputs
+- retrieval provenance and errors
+- ESM neighbours
+- latency
+- model, prompt, database, runner, and dataset hashes
+
+See the benchmark runner and methodology files in the repository for the exact experiment definition. Follow-up inference-time reasoning experiments are kept separate until complete; unfinished results are not reported here.
+
+## Benchmark reporting policy
+
+For reproducibility, benchmark results should be tied to a frozen:
+
+- question set
+- model tag and inference settings
+- prompt / architecture version
+- code commit
+- local database hash
+- evaluation script
+- raw result artifact
+
+Development sets, selected hard cases, and final held-out evaluations should be labelled separately. Architecture changes are not tuned against a held-out final benchmark after it has been opened.
 
 ## Installation
 
@@ -122,20 +156,7 @@ This is important because a small general-purpose model can understand the biolo
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-Copy the example configuration:
-
-```bash
 cp config.example .env
-```
-
-For Gemini:
-
-```text
-AI_PROVIDER=gemini
-GEMINI_API_KEY=your_key_here
-GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
 For local Qwen through Ollama:
@@ -146,13 +167,17 @@ OLLAMA_MODEL=qwen3:4b-instruct
 OLLAMA_URL=http://127.0.0.1:11434
 ```
 
-Optional `NCBI_EMAIL` and `NCBI_API_KEY` settings are supported for PubMed E-utilities.
+For Gemini:
+
+```text
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+Optional `NCBI_EMAIL` and `NCBI_API_KEY` values are supported for PubMed E-utilities.
 
 ## Run locally
-
-```bash
-python app.py --db data/zebrafish_esm.db
-```
 
 On macOS:
 
@@ -160,7 +185,19 @@ On macOS:
 ./start_dashboard.command
 ```
 
-Then open `http://127.0.0.1:5000`.
+The launcher normally opens:
+
+```text
+http://127.0.0.1:8000
+```
+
+and falls back to port `3000` if required.
+
+Or start directly:
+
+```bash
+python app.py --db data/zebrafish_esm.db --host 127.0.0.1 --port 8000
+```
 
 ## Build the private database
 
@@ -174,47 +211,30 @@ python build_database.py \
   --out-db data/zebrafish_esm.db
 ```
 
-## Evaluation
-
-### Initial 24-question local-model benchmark
-
-In one pre-augmentation local run of `qwen3:4b-instruct`, 23 of 24 questions produced at least one deterministically validated zebrafish ESM seed, and 17 of 24 included at least one predefined canonical reference example. Reference overlap is a diagnostic measure rather than a biological accuracy score.
-
-The broad macrophage-marker case exposed a useful failure mode: the small model understood macrophage biology but missed the canonical zebrafish `mpeg1.1` symbol. Adding local zebrafish metadata context and authoritative biological retrieval subsequently allowed the same local model to identify and validate `mpeg1.1` without a macrophage-specific hard-coded rule.
-
-See [`docs/local-qwen3-4b-benchmark.md`](docs/local-qwen3-4b-benchmark.md) for the original benchmark details and post-benchmark retest.
-
-### Paired 100-question benchmark
-
-A paired benchmark is being run across 100 specific biological questions. Each question is evaluated twice with the same `qwen3:4b-instruct` model:
-
-1. **Qwen alone** — question + structured seed-selection prompt; no retrieval context before generation.
-2. **Augmented Qwen** — local zebrafish metadata + PubMed + Europe PMC + QuickGO before Qwen candidate ranking, followed by deterministic validation and ESM search.
-
-The benchmark records raw model output, proposed genes, unresolved identifiers, validated seeds, reference overlap, ESM neighbours, retrieval provenance, latency, and paired rescue/improvement metrics. The test is designed to quantify whether scientific retrieval and deterministic tools improve a small local model for zebrafish protein discovery without fine-tuning the model weights.
-
-No final 100-query result is claimed here until the paired run is complete.
+The embedding matrix and private search database are intentionally not committed to the public repository.
 
 ## Tests
 
-Run the local regression suite:
-
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile app.py build_database.py scripts/live_integration_test.py
+python -m py_compile app.py build_database.py
 ```
 
-Live integration tests are intentionally excluded from public CI when they require local data, local Ollama, or external biological services.
+Live integrations that require the private embedding database, local Ollama, or external biological services are kept out of public CI where appropriate.
 
 ## Limitations
 
 - ESM similarity is a discovery signal, not proof of shared function, pathway membership, interaction, or homology.
-- A validated identifier does not by itself prove biological relevance.
-- LLM ranking can still be incomplete or wrong even when grounded.
-- Retrieval quality depends on the query and source coverage.
-- The current vector search uses a simple local NumPy implementation rather than a dedicated ANN index.
-- Mean-pooled ESM embeddings are a practical baseline and could be compared with alternative representations.
+- A valid zebrafish identifier does not by itself prove biological relevance.
+- Canonical benchmark lists are diagnostic examples, not exhaustive ground truth.
+- LLM ranking can still be incomplete or wrong even when retrieval and validation succeed.
+- Public retrieval quality varies with query wording and source coverage.
+- Mean-pooled ESM embeddings and brute-force NumPy similarity are practical baselines rather than final optimized retrieval infrastructure.
 
-## Project framing
+## Project goal
 
-This project is primarily an example of scientific AI system design rather than model training: combining a protein foundation model, local vector search, local/open-weight and cloud LLMs, authoritative biological APIs, deterministic validation, benchmarking, and iterative scientific failure analysis into one usable workflow.
+This project asks a practical systems question:
+
+> **How far can a small local open-weight model be specialized for a scientific workflow without changing its weights?**
+
+The approach combines protein foundation-model representations, a private species-specific search space, local LLM inference, authoritative biological services, deterministic validation, and controlled benchmarking into one usable zebrafish discovery workflow.
