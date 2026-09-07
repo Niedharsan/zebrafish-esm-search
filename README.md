@@ -2,7 +2,7 @@
 
 **ESM + grounded AI discovery for the *Danio rerio* proteome.**
 
-A local scientific search system that combines whole-proteome ESM embeddings, deterministic protein lookup, local/open-weight LLM reasoning, biological APIs, and exact zebrafish identifier validation.
+A local scientific search system that combines whole-proteome ESM embeddings, deterministic protein lookup, a choice of Gemini or local Qwen reasoning, biological search tools, and exact zebrafish identifier validation.
 
 The current private search database contains **22,523 zebrafish proteins**, represented by **2,560-dimensional ESMC 6B embeddings** and searched locally by cosine similarity.
 
@@ -46,9 +46,11 @@ The AI layer interprets the question and proposes biologically relevant candidat
 ```text
 biological question
         ↓
-Qwen3 4B biological interpretation
+Gemini + grounded Google Search
+or
+Qwen3 4B + local/scientific retrieval
         ↓
-scientific retrieval / biological APIs
+biological candidate selection
         ↓
 exact zebrafish validation
         ↓
@@ -67,8 +69,8 @@ The language model is used for **biological interpretation and ranking**, not as
 
 A fluent answer can still contain the wrong zebrafish symbol, a mammalian-style gene name, or a biologically related protein that is not a good answer to the question. The system therefore separates responsibilities:
 
-- **Qwen3 4B / Gemini:** biological interpretation and candidate selection
-- **PubMed / Europe PMC / QuickGO:** scientific evidence
+- **Gemini + grounded Google Search:** hosted biological research and candidate selection
+- **Qwen3 4B + PubMed / Europe PMC / QuickGO / local metadata:** local-model biological interpretation with scientific evidence
 - **UniProt / Ensembl / local DB:** identifier resolution and validation
 - **ESMC 6B embeddings:** protein-representation similarity and candidate expansion
 
@@ -87,11 +89,13 @@ Current local dataset:
 
 ESMC is used to generate the reusable embedding dataset. Normal dashboard searches operate on the local vectors and do not require a new ESM inference call.
 
-## Local Qwen path
+## AI provider options
 
-The local AI path runs **`qwen3:4b-instruct` through Ollama**. The model weights are unchanged; adaptation happens at the system level through zebrafish-specific context, retrieval, tools, deterministic validation, and benchmarking.
+The dashboard supports two biological-discovery providers. Set `AI_PROVIDER=gemini` for **Gemini with grounded Google Search**, or `AI_PROVIDER=ollama` for **local `qwen3:4b-instruct` through Ollama**.
 
-Current scientific integrations include:
+The Gemini path uses grounded search to research the biological question, converts that evidence into structured candidates, and passes those candidates through the same zebrafish-specific identifier validation before ESM ranking.
+
+The local Qwen path specializes the unchanged model at the system level through zebrafish-specific context, retrieval, scientific tools, and deterministic validation. Its integrations include:
 
 - local zebrafish protein metadata
 - PubMed E-utilities
@@ -101,11 +105,13 @@ Current scientific integrations include:
 - Ensembl REST
 - local ESM similarity search
 
-The model and embedding database remain local. Public biological services receive only query-derived terms; raw embedding vectors and local database credentials are not sent to them.
+The embedding database always remains local. With Qwen, model inference also remains local and public biological services receive only query-derived terms. With Gemini, the biological question and grounded-search request are sent to Gemini; raw embedding vectors and local database credentials are not sent to any provider.
 
 ## Benchmarking
 
 The project is benchmarked at the **system level**, not only by whether the LLM returns a syntactically valid gene name.
+
+The results below evaluate the local Qwen path only. Gemini remains a supported runtime option; a separate Gemini grounded-search and tools benchmark has not yet been reported.
 
 The most important diagnostic is whether the ranked validated seed list recovers predefined **canonical zebrafish reference genes**. Canonical overlap is useful for comparison, but it is **not treated as biological accuracy** because the reference lists are intentionally non-exhaustive.
 
