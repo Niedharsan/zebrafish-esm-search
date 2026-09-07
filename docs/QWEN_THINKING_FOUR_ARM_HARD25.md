@@ -39,15 +39,13 @@ The three runs are stateless calls to the same Qwen model. This is repeated infe
 
 ## Model settings
 
-All four use:
+All four use the same model-generation settings as the previous hard-25 run, with only `think: true` added:
 
 - `qwen3:4b-instruct`
 - `think: true`
-- temperature `0.6`
-- top_p `0.95`
-- top_k `20`
+- temperature `0.1`
 - context `8192`
-- prediction budget `2400`
+- prediction budget `1200`
 - final response format JSON
 
 ## Dataset
