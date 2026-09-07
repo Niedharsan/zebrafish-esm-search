@@ -1,1 +1,38 @@
-PLACEHOLDER
+{
+  "benchmark_name": "zebrafish_esm_qwen3_4b_three_arm_hard25",
+  "benchmark_version": 1,
+  "source": "Selected from the first 50 completed cases of the existing 100-question paired benchmark.",
+  "selection_rule": {
+    "base_canonical_current_augmented_miss": [8,10,13,14,15,16,20,22,27,31,32,34,38,42,44,45,46,47],
+    "neither_canonical": [3,11,21,24,36,50],
+    "known_augmented_rescue_control": [1]
+  },
+  "case_count": 25,
+  "cases": [
+    {"id":1,"category":"cell_type_lineage","subtopic":"macrophage","wording":"direct","query_specificity":"specific","query":"Which proteins mark zebrafish macrophages?","expected_examples":["mpeg1.1","mfap4","csf1ra","marco"]},
+    {"id":3,"category":"cell_type_lineage","subtopic":"neutrophil","wording":"direct","query_specificity":"specific","query":"Which proteins mark zebrafish neutrophils?","expected_examples":["mpx","lyz","cxcr2","csf3r"]},
+    {"id":8,"category":"cell_type_lineage","subtopic":"vascular_endothelial_cell","wording":"paraphrase","query_specificity":"specific","query":"Which zebrafish proteins identify the cells lining blood vessels?","expected_examples":["kdrl","cdh5","fli1a","etv2"]},
+    {"id":10,"category":"cell_type_lineage","subtopic":"cardiomyocyte","wording":"paraphrase","query_specificity":"specific","query":"Which proteins identify the contractile muscle cells of the zebrafish heart?","expected_examples":["myl7","tnnt2a","myh6","nkx2.5"]},
+    {"id":11,"category":"tissue_organ","subtopic":"hepatocyte","wording":"direct","query_specificity":"specific","query":"Which proteins mark zebrafish hepatocytes?","expected_examples":["fabp10a","tfa","apoa1a","hnf4a"]},
+    {"id":13,"category":"tissue_organ","subtopic":"pancreatic_beta_cell","wording":"direct","query_specificity":"specific","query":"Which proteins mark pancreatic beta cells in zebrafish?","expected_examples":["ins","pdx1","nkx6.1","isl1"]},
+    {"id":14,"category":"tissue_organ","subtopic":"pancreatic_beta_cell","wording":"paraphrase","query_specificity":"specific","query":"Which proteins identify the insulin-producing endocrine cells of the zebrafish pancreas?","expected_examples":["ins","pdx1","nkx6.1","isl1"]},
+    {"id":15,"category":"tissue_organ","subtopic":"pronephric_epithelium","wording":"direct","query_specificity":"specific","query":"Which genes mark pronephric epithelial cells in zebrafish?","expected_examples":["cdh17","pax2a","wt1a","slc20a1a"]},
+    {"id":16,"category":"tissue_organ","subtopic":"pronephric_epithelium","wording":"paraphrase","query_specificity":"specific","query":"Which genes identify epithelial cells of the embryonic zebrafish kidney tubule?","expected_examples":["cdh17","pax2a","wt1a","slc20a1a"]},
+    {"id":20,"category":"tissue_organ","subtopic":"retinal_photoreceptor","wording":"paraphrase","query_specificity":"specific","query":"Which proteins identify the light-sensing cells of the zebrafish retina?","expected_examples":["rho","crx","nr2e3","opn1sw1"]},
+    {"id":21,"category":"named_pathway","subtopic":"wnt_beta_catenin","wording":"direct","query_specificity":"specific","query":"Which proteins are involved in canonical Wnt beta-catenin signaling in zebrafish?","expected_examples":["ctnnb1","lef1","axin2","wnt3a"]},
+    {"id":22,"category":"named_pathway","subtopic":"wnt_beta_catenin","wording":"paraphrase","query_specificity":"specific","query":"Which proteins transmit the signal that stabilizes beta-catenin and activates TCF/LEF transcription in zebrafish?","expected_examples":["ctnnb1","lef1","axin2","wnt3a"]},
+    {"id":24,"category":"named_pathway","subtopic":"notch","wording":"paraphrase","query_specificity":"specific","query":"Which zebrafish proteins mediate lateral inhibition through membrane-bound Delta or Jagged ligands?","expected_examples":["notch1a","dll4","jag1a","rbpja"]},
+    {"id":27,"category":"named_pathway","subtopic":"bmp","wording":"direct","query_specificity":"specific","query":"Which proteins are involved in BMP signaling in zebrafish?","expected_examples":["bmp2b","bmp4","smad1","smad5"]},
+    {"id":31,"category":"biological_process","subtopic":"erythropoiesis","wording":"direct","query_specificity":"specific","query":"Which genes regulate zebrafish erythropoiesis?","expected_examples":["gata1a","klf1","tal1","alas2"]},
+    {"id":32,"category":"biological_process","subtopic":"erythropoiesis","wording":"paraphrase","query_specificity":"specific","query":"Which genes drive formation and maturation of red blood cells in zebrafish?","expected_examples":["gata1a","klf1","tal1","alas2"]},
+    {"id":34,"category":"biological_process","subtopic":"angiogenesis","wording":"paraphrase","query_specificity":"specific","query":"Which proteins drive new blood-vessel sprouting in zebrafish?","expected_examples":["vegfaa","kdrl","flt1","dll4"]},
+    {"id":36,"category":"biological_process","subtopic":"autophagy","wording":"paraphrase","query_specificity":"specific","query":"Which proteins build the pathway that encloses cytoplasmic cargo in autophagosomes in zebrafish?","expected_examples":["atg5","atg7","becn1","map1lc3b"]},
+    {"id":38,"category":"biological_process","subtopic":"apoptosis","wording":"paraphrase","query_specificity":"specific","query":"Which proteins execute programmed cell death in zebrafish?","expected_examples":["tp53","baxa","casp3a","bcl2a"]},
+    {"id":42,"category":"development","subtopic":"neural_crest","wording":"paraphrase","query_specificity":"specific","query":"Which genes specify the migratory embryonic cells that later form pigment cells and craniofacial structures in zebrafish?","expected_examples":["sox10","foxd3","tfap2a","snai1b"]},
+    {"id":44,"category":"development","subtopic":"heart_development","wording":"paraphrase","query_specificity":"specific","query":"Which transcription factors are central to formation of the embryonic zebrafish heart?","expected_examples":["nkx2.5","gata4","hand2","tbx5a"]},
+    {"id":45,"category":"development","subtopic":"definitive_hematopoiesis","wording":"direct","query_specificity":"specific","query":"Which genes regulate definitive hematopoiesis in zebrafish?","expected_examples":["runx1","cmyb","gata2b","tal1"]},
+    {"id":46,"category":"development","subtopic":"definitive_hematopoiesis","wording":"paraphrase","query_specificity":"specific","query":"Which genes establish hematopoietic stem and progenitor cells in the zebrafish AGM region?","expected_examples":["runx1","cmyb","gata2b","tal1"]},
+    {"id":47,"category":"development","subtopic":"dopaminergic_neuron","wording":"direct","query_specificity":"specific","query":"Which genes identify dopaminergic neurons in zebrafish?","expected_examples":["th","slc6a3","ddc","nr4a2a"]},
+    {"id":50,"category":"development","subtopic":"motor_neuron","wording":"paraphrase","query_specificity":"specific","query":"Which genes specify spinal neurons that innervate skeletal muscle in zebrafish?","expected_examples":["mnx1","isl1","isl2a","olig2"]}
+  ]
+}
