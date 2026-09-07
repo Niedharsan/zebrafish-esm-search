@@ -14,7 +14,7 @@ class ThinkingFourArmTests(unittest.TestCase):
         self.case={"id":1,"category":"cell_type_lineage","subtopic":"macrophage","wording":"direct",
                    "query_specificity":"specific","query":"Which proteins mark zebrafish macrophages?",
                    "expected_examples":["mpeg1.1","mfap4","csf1ra","marco"]}
-        self.args=argparse.Namespace(model="qwen3:4b-instruct",temperature=.6,top_p=.95,top_k=20,num_ctx=8192,num_predict=2400)
+        self.args=argparse.Namespace(model="qwen3:4b-instruct",temperature=.1,num_ctx=8192,num_predict=1200)
         self.plan={"normalized_question":self.case["query"],
                    "zebrafish_candidates":[{"gene":"mpeg1.1","species":"zebrafish","uniprot_accession":"","reason":"marker"}],
                    "reference_candidates":[],"rationale":"test"}
@@ -35,9 +35,9 @@ class ThinkingFourArmTests(unittest.TestCase):
         self.assertEqual(bench.ARMS,("thinking_arm2","thinking_base","thinking_x3_synthesis","thinking_x3_tools_synthesis"))
 
     def test_payload_turns_thinking_on(self):
-        p=bench.thinking_payload("x",model="qwen3:4b-instruct",temperature=.6,top_p=.95,top_k=20,num_ctx=8192,num_predict=2400)
+        p=bench.thinking_payload("x",model="qwen3:4b-instruct",temperature=.1,num_ctx=8192,num_predict=1200)
         self.assertIs(p["think"],True); self.assertEqual(p["format"],"json")
-        self.assertEqual(p["options"],{"temperature":.6,"top_p":.95,"top_k":20,"num_ctx":8192,"num_predict":2400})
+        self.assertEqual(p["options"],{"temperature":.1,"num_ctx":8192,"num_predict":1200})
 
     def test_thinking_base_one_call_no_tools(self):
         with patch.object(bench,"call_thinking_qwen",return_value=(self.plan,{"thinking_present":True})) as qwen, \
