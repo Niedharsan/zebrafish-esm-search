@@ -20,9 +20,9 @@ DEFAULT_DB=ROOT/"data"/"zebrafish_esm.db"
 DEFAULT_CP=ROOT/"qwen3_4b_thinking_four_arm_25_checkpoint.json"
 DEFAULT_OUT=ROOT/"qwen3_4b_thinking_four_arm_25_results.json"
 
-def thinking_payload(prompt,*,model,temperature,top_p,top_k,num_ctx,num_predict):
+def thinking_payload(prompt,*,model,temperature,num_ctx,num_predict):
     return {"model":model,"prompt":prompt,"stream":False,"format":"json","think":True,
-            "options":{"temperature":temperature,"top_p":top_p,"top_k":top_k,"num_ctx":num_ctx,"num_predict":num_predict}}
+            "options":{"temperature":temperature,"num_ctx":num_ctx,"num_predict":num_predict}}
 
 def call_thinking_qwen(prompt,question,**cfg):
     attempts=[]; last=None
@@ -45,8 +45,7 @@ def call_thinking_qwen(prompt,question,**cfg):
     raise RuntimeError(f"Thinking Ollama failed to return valid JSON after one retry. ({last})") from last
 
 def cfg(args):
-    return {"model":args.model,"temperature":args.temperature,"top_p":args.top_p,"top_k":args.top_k,
-            "num_ctx":args.num_ctx,"num_predict":args.num_predict}
+    return {"model":args.model,"temperature":args.temperature,"num_ctx":args.num_ctx,"num_predict":args.num_predict}
 
 def compact_plan(plan):
     return {"normalized_question":str(plan.get("normalized_question") or "")[:240],
@@ -202,9 +201,8 @@ def output(cases,args):
                         "case_count":25,"completed_case_count":len(cases),"cases_sha256":base.sha(args.cases),
                         "app_sha256":base.sha(ROOT/"app.py"),"runner_sha256":base.sha(Path(__file__)),
                         "database_sha256":base.sha(args.db),"k":args.k,
-                        "ollama_settings":{"think":True,"temperature":args.temperature,"top_p":args.top_p,
-                                           "top_k":args.top_k,"num_ctx":args.num_ctx,"num_predict":args.num_predict,
-                                           "format":"json"},"arms":list(ARMS)},
+                        "ollama_settings":{"think":True,"temperature":args.temperature,"num_ctx":args.num_ctx,
+                                           "num_predict":args.num_predict,"format":"json"},"arms":list(ARMS)},
             "summary":summaries,"pairwise":pairs,"cases":cases}
 
 def print_summary(cases):
@@ -220,9 +218,8 @@ def parse_args():
     p.add_argument("--cases",default=str(DEFAULT_CASES)); p.add_argument("--db",default=str(DEFAULT_DB))
     p.add_argument("--model",default="qwen3:4b-instruct"); p.add_argument("--k",type=int,default=5)
     p.add_argument("--out",default=str(DEFAULT_OUT)); p.add_argument("--checkpoint",default=str(DEFAULT_CP))
-    p.add_argument("--temperature",type=float,default=.6); p.add_argument("--top-p",type=float,default=.95)
-    p.add_argument("--top-k",type=int,default=20); p.add_argument("--num-ctx",type=int,default=8192)
-    p.add_argument("--num-predict",type=int,default=2400)
+    p.add_argument("--temperature",type=float,default=.1); p.add_argument("--num-ctx",type=int,default=8192)
+    p.add_argument("--num-predict",type=int,default=1200)
     return p.parse_args()
 
 def main():
